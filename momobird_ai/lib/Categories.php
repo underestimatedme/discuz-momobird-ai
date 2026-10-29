@@ -130,14 +130,21 @@ final class MomoBird_Categories
         return self::cleanName((string) ($byFid[$fup]['name'] ?? ''));
     }
 
-    /** Strip tags, decode entities, collapse whitespace, cut to the maximum length. */
+    /**
+     * Strip tags, decode entities, collapse whitespace, drop control and invisible format
+     * characters (the backend rejects the whole post for one), cut to the maximum length.
+     */
     private static function cleanName(string $name): string
     {
         if ($name !== '' && preg_match('//u', $name) !== 1) {
             $name = (string) @iconv('UTF-8', 'UTF-8//IGNORE', $name);
         }
         $name = html_entity_decode(strip_tags($name), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        // Whitespace controls (tab, newline, NEL, ...) become spaces first; the rest of
+        // Cc and the invisible Cf marks (zero-width, BOM, bidi) are removed outright.
         $name = preg_replace('/[\s\x{00A0}\x{3000}]+/u', ' ', $name);
+        $name = preg_replace('/[\p{Cc}\p{Cf}]+/u', '', (string) $name);
+        $name = preg_replace('/ {2,}/', ' ', (string) $name);
         return self::truncate((string) $name, self::MAX_LENGTH);
     }
 

@@ -13,6 +13,25 @@ final class MomoBird_Visibility
     /** The id of Discuz!'s built-in guest user group. */
     const DEFAULT_GUEST_GROUP_ID = 7;
 
+    /*
+     * Columns the adapter must select. A missing column fails closed, so a forgotten
+     * one shows up as "nothing syncs" instead of a leak. Join the author columns of
+     * POST_COLUMNS from common_member (username, groupid) and common_member_status
+     * (memberstatus) with LEFT JOINs; NULL there means "no such row".
+     */
+    /** forum_thread */
+    const THREAD_COLUMNS = array('tid', 'displayorder', 'closed', 'readperm', 'price', 'isgroup', 'digest');
+    /** first forum_post row, plus the joined author columns */
+    const POST_COLUMNS = array('tid', 'first', 'invisible', 'status', 'message', 'authorid', 'username', 'groupid', 'memberstatus');
+    /** forum_forum */
+    const FORUM_COLUMNS = array('fid', 'fup', 'type', 'name', 'status');
+    /** forum_forumfield (LEFT JOIN: a missing row must come through as NULLs) */
+    const FORUMFIELD_COLUMNS = array('fid', 'viewperm', 'password', 'formulaperm', 'price', 'redirect');
+    /** common_usergroup + common_usergroup_field for the guest group */
+    const GUEST_GROUP_COLUMNS = array('groupid', 'readaccess', 'allowvisit');
+    /** $_G['setting'] keys */
+    const SETTING_KEYS = array('bbclosed', 'bannedmessages');
+
     /**
      * Whole-site gate: forum switched off, or the guest group may not visit.
      *
@@ -54,6 +73,13 @@ final class MomoBird_Visibility
             return 'hidden';
         }
 
+        // The forumfield row is joined in: absent or NULL columns mean the row is missing.
+        foreach (array('viewperm', 'password', 'formulaperm', 'price', 'redirect') as $column) {
+            if (!isset($forumfield[$column])) {
+                return 'missing_forumfield';
+            }
+        }
+
         if (self::filled($forumfield, 'password')) {
             return 'password';
         }
@@ -81,10 +107,11 @@ final class MomoBird_Visibility
 
     /**
      * @param array $thread    forum_thread row
-     * @param array $firstPost the thread's first forum_post row (message, and X5's content)
-     * @return string|null displayorder|moved|readperm|price|isgroup|post_invisible|post_banned|password_post|missing_post
+     * @param array $firstPost the thread's first forum_post row (message, X5's content, joined author columns)
+     * @param array $setting   $_G['setting'] (bannedmessages)
+     * @return string|null displayorder|moved|readperm|price|isgroup|missing_post|post_invisible|post_banned|author_banned|password_post
      */
-    public static function thread(array $thread, array $firstPost, array $guestGroup): ?string
+    public static function thread(array $thread, array $firstPost, array $guestGroup, array $setting): ?string
     {
         // 0 normal, 1-3 sticky. Below 0: recycle bin, moderation queue, ignored, draft.
         $displayorder = self::column($thread, 'displayorder');
@@ -115,7 +142,8 @@ final class MomoBird_Visibility
         if (!$firstPost || self::column($firstPost, 'first') !== 1) {
             return 'missing_post';
         }
-        if (isset($thread['tid'], $firstPost['tid']) && self::number($thread['tid']) !== self::number($firstPost['tid'])) {
+        $tid = self::column($thread, 'tid');
+        if ($tid === null || $tid !== self::column($firstPost, 'tid')) {
             return 'missing_post';
         }
 
@@ -129,6 +157,10 @@ final class MomoBird_Visibility
             return 'post_banned';
         }
 
+        if (self::authorHidden($thread, $firstPost, $setting)) {
+            return 'author_banned';
+        }
+
         // A [password] post is blank for guests; X5 may carry the tag in either column.
         foreach (array('message', 'content') as $key) {
             if (isset($firstPost[$key]) && is_string($firstPost[$key]) && preg_match(MomoBird_ContentText::PASSWORD_PATTERN, $firstPost[$key]) !== 0) {
@@ -136,6 +168,42 @@ final class MomoBird_Visibility
             }
         }
         return null;
+    }
+
+    /**
+     * viewthread_node_body.htm: with bannedmessages bit 1 set, guests get "content hidden"
+     * instead of the post when the author's account was deleted, or (non-digest threads
+     * only) the author is in banned group 4/5 or has member status -1.
+     * Fails closed: an unknown setting counts as set, missing author columns as hidden.
+     */
+    private static function authorHidden(array $thread, array $firstPost, array $setting): bool
+    {
+        $banned = array_key_exists('bannedmessages', $setting) ? self::number($setting['bannedmessages']) : null;
+        if ($banned !== null && ($banned & 1) === 0) {
+            return false;
+        }
+
+        foreach (array('authorid', 'username', 'groupid', 'memberstatus') as $column) {
+            if (!array_key_exists($column, $firstPost)) {
+                return true;
+            }
+        }
+        $authorid = self::column($firstPost, 'authorid');
+        if ($authorid === null) {
+            return true;
+        }
+        if ($authorid !== 0 && empty(trim((string) $firstPost['username']))) {
+            return true;
+        }
+
+        $digest = array_key_exists('digest', $thread) ? self::number($thread['digest']) : null;
+        if ($digest === 0 || $digest === null) {
+            $groupid = self::number($firstPost['groupid']);
+            if ($groupid === 4 || $groupid === 5 || self::number($firstPost['memberstatus']) === -1) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Integer value of a database column, or null when it is absent or not numeric. */

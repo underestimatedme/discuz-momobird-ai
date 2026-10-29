@@ -134,3 +134,24 @@ mb_test('categories: loops in fup do not hang', function () {
     $result = MomoBird_Categories::build($rows);
     mb_assert_same(2, count($result), 'both forums need a category');
 });
+
+mb_test('categories: control and format characters are removed', function () {
+    $rows = array(
+        mb_cat_row(1, 0, 'group', 'G'),
+        mb_cat_row(2, 1, 'forum', "a\x01b\x7Fc\x07"),
+        mb_cat_row(3, 1, 'forum', 'set below'),
+        mb_cat_row(4, 1, 'forum', "a\tb\nc"),
+        mb_cat_row(5, 1, 'forum', "x&#7;y&#0;z\xC2\x85w"),
+        mb_cat_row(6, 1, 'forum', "\x01\x02"),
+    );
+    $rows[2]['name'] = json_decode('"\u540d\u200b\u5b57\ufeff\u202e"');
+    $result = MomoBird_Categories::build($rows);
+    mb_assert_same('abc', $result[2], 'C0 and DEL');
+    mb_assert_same('名字', $result[3], 'zero-width, BOM and bidi marks');
+    mb_assert_same('a b c', $result[4], 'tabs and newlines are spaces, not deleted');
+    mb_assert_same('x&#7;y&#0;z w', $result[5], 'undecodable control entities stay literal text; NEL is a space');
+    mb_assert_same('#6', $result[6], 'only control characters leaves the blank-name fallback');
+    foreach ($result as $category) {
+        mb_assert(preg_match('/[\p{Cc}\p{Cf}]/u', $category) === 0, 'control character left in ' . json_encode($category));
+    }
+});
