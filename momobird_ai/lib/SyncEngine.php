@@ -108,6 +108,7 @@ final class MomoBird_SyncEngine
             if ($ctx === null) {
                 return;
             }
+            $this->baselineFingerprint($ctx);
             $this->drainQueue($run, $ctx, $deadline);
             // While a reconcile is listing, the orphan set is incomplete: the guard waits for it.
             if ($this->store->get('reconcile') === null) {
@@ -220,6 +221,7 @@ final class MomoBird_SyncEngine
         }
 
         if ($cursor === null) {
+            $this->baselineFingerprint($ctx);
             if (!$this->refreshStatusCache($run)) {
                 $run->fail($run->error !== null ? $run->error : '无法读取 MomoBird 的连接状态，没有开始同步');
                 return $stop;
@@ -1224,7 +1226,8 @@ final class MomoBird_SyncEngine
      * Compare what decides "may a guest read it, under which category" with the last
      * tick, and queue the threads of every forum whose answer changed.
      */
-    private function fingerprint(MomoBird_SyncResult $run, array $ctx): void
+    /** What decides "may a guest read it, under which category", per forum and site-wide. */
+    private function currentFingerprint(array $ctx): array
     {
         $forums = array();
         foreach ($ctx['forums'] as $fid => $row) {
@@ -1242,7 +1245,27 @@ final class MomoBird_SyncEngine
             $this->settings->forumUrl(),
             $ctx['rewrite'],
         )));
-        $now = array('global' => $global, 'forums' => $forums);
+        return array('global' => $global, 'forums' => $forums);
+    }
+
+    /**
+     * A drain or full sync that pushes under the current settings records them as the baseline
+     * when there is none yet. On PHP-FPM threads are pushed right after posting, so the first
+     * cron tick may only come after a forum was hidden; it must compare against what was pushed.
+     * An existing baseline is left for the tick to compare.
+     */
+    private function baselineFingerprint(array $ctx): void
+    {
+        if ($this->store->get('fingerprint') === null) {
+            $this->store->set('fingerprint', $this->currentFingerprint($ctx));
+        }
+    }
+
+    private function fingerprint(MomoBird_SyncResult $run, array $ctx): void
+    {
+        $now = $this->currentFingerprint($ctx);
+        $global = $now['global'];
+        $forums = $now['forums'];
         $old = $this->store->get('fingerprint');
         if ($old === $now) {
             return;

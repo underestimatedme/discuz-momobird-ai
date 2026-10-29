@@ -467,6 +467,55 @@ mb_test('fingerprint change requeues the forum: view permission withdraws its th
     mb_assert_same(0, $w->server->count('PUT /posts'), 'nothing pushed');
 });
 
+mb_test('fingerprint baseline is taken by the full sync: a forum hidden before the first tick is withdrawn by it', function () {
+    // Found on X5 (PHP-FPM): pushes happen after the response, so the first cron tick can come
+    // after a permission change; without a baseline it only recorded the new state.
+    $w = mb_se();
+    mb_se_threads($w, array(11, 12), 2);
+    mb_se_threads($w, array(21), 3);
+    mb_se_full($w);
+    mb_assert($w->store->get('fingerprint') !== null, 'the full sync records the baseline');
+    mb_se_reset_requests($w);
+
+    $w->forum->fields[2]['viewperm'] = "\t1\t";
+    $w->clock->now += 60;
+    $w->engine->cronTick(mb_se_deadline($w));
+    $deleted = $w->server->deletedIds();
+    sort($deleted);
+    mb_assert_same(array('11', '12'), $deleted, 'hidden forum withdrawn by the first tick');
+    mb_assert_same('synced', $w->store->state(21), 'other forum untouched');
+});
+
+mb_test('fingerprint baseline is taken by a drain: a forum hidden before the first tick is withdrawn by it', function () {
+    $w = mb_se();
+    mb_se_threads($w, array(11), 2);
+    mb_se_threads($w, array(21), 3);
+    mb_se_sync($w, array(11, 21));
+    mb_assert($w->store->get('fingerprint') !== null, 'the drain records the baseline');
+    mb_se_reset_requests($w);
+
+    $w->forum->fields[2]['viewperm'] = "\t1\t";
+    $w->clock->now += 60;
+    $w->engine->cronTick(mb_se_deadline($w));
+    mb_assert_same(array('11'), $w->server->deletedIds(), 'hidden forum withdrawn by the first tick');
+});
+
+mb_test('a drain never replaces a baseline the tick has not compared yet', function () {
+    $w = mb_se();
+    mb_se_threads($w, array(11), 2);
+    mb_se_threads($w, array(21), 3);
+    mb_se_sync($w, array(11, 21));
+    mb_se_reset_requests($w);
+
+    // The forum is hidden, then a hook drains another thread before any tick.
+    $w->forum->fields[2]['viewperm'] = "\t1\t";
+    $w->forum->addThread(22, 3);
+    mb_se_sync($w, array(22));
+    $w->clock->now += 60;
+    $w->engine->cronTick(mb_se_deadline($w));
+    mb_assert_same(array('11'), $w->server->deletedIds(), 'still withdrawn by the tick');
+});
+
 mb_test('fingerprint change requeues the forum: renaming a top forum re-pushes it and its sub-forums', function () {
     $w = mb_se();
     $w->forum->addForum(4, '新能源', 2, 'sub');
