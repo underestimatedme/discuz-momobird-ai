@@ -171,3 +171,18 @@ mb_test('serialized settings keep everything except the key', function () {
     mb_assert_same($s->key(), $s->key(), 'the original still has its key');
     mb_assert_same(MB_TEST_KEY, (clone $s)->key(), 'clones keep the key');
 });
+
+mb_test('stored settings: the key comes from the secret row and an empty address follows the site url', function () {
+    $s = MomoBird_Settings::fromStored(array('timeout' => 12, 'forumUrl' => ''), array('key' => MB_TEST_KEY), 'https://bbs.example.com/');
+    mb_assert_same(MB_TEST_KEY, $s->key(), 'key from the secret row');
+    mb_assert_same(12, $s->timeout(), 'stored values');
+    mb_assert_same('https://bbs.example.com/', $s->forumUrl(), 'site url fallback');
+
+    $s = MomoBird_Settings::fromStored(array('forumUrl' => 'https://forum.example.com/', 'key' => 'mbk_ignoredignoredignored'), null, 'https://bbs.example.com/');
+    mb_assert_same('', $s->key(), 'a key in the settings row is ignored');
+    mb_assert_same('https://forum.example.com/', $s->forumUrl(), 'an entered address wins');
+
+    $s = MomoBird_Settings::fromStored(null, array('key' => 42), '');
+    mb_assert_same('', $s->key(), 'a non-string key is ignored');
+    mb_assert_same(MomoBird_Settings::DEFAULT_BASE_URL, $s->baseUrl(), 'defaults');
+});

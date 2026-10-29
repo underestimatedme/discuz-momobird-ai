@@ -31,8 +31,8 @@ spl_autoload_register(function ($class) {
 
 final class MomoBird_Bootstrap
 {
-    const SETTINGS_KEY = 'settings';
-    const SECRET_KEY = 'secret';
+    const SETTINGS_KEY = MomoBird_Settings::KV_SETTINGS;
+    const SECRET_KEY = MomoBird_Settings::KV_SECRET;
     /** Seconds a request may spend syncing after its response (hook drain, cron tick). */
     const RUN_SECONDS = 20;
 
@@ -70,14 +70,7 @@ final class MomoBird_Bootstrap
     {
         if (self::$settings === null) {
             $store = self::store();
-            $values = $store->get(self::SETTINGS_KEY);
-            $values = is_array($values) ? $values : array();
-            $secret = $store->get(self::SECRET_KEY);
-            $values['key'] = isset($secret['key']) && is_string($secret['key']) ? $secret['key'] : '';
-            if (!isset($values['forumUrl']) || trim((string) $values['forumUrl']) === '') {
-                $values['forumUrl'] = self::siteUrl();
-            }
-            self::$settings = MomoBird_Settings::fromArray($values, self::httpHosts());
+            self::$settings = MomoBird_Settings::fromStored($store->get(self::SETTINGS_KEY), $store->get(self::SECRET_KEY), self::siteUrl(), self::httpHosts());
         }
         return self::$settings;
     }
@@ -113,9 +106,10 @@ final class MomoBird_Bootstrap
         self::$frontEnd = null;
     }
 
-    public static function engine(): MomoBird_SyncEngine
+    /** The engine for the stored settings, or for $settings (the admin page's fresh copy). */
+    public static function engine(?MomoBird_Settings $settings = null): MomoBird_SyncEngine
     {
-        $settings = self::settings();
+        $settings = $settings !== null ? $settings : self::settings();
         $host = strtolower((string) parse_url($settings->baseUrl(), PHP_URL_HOST));
         $transport = new MomoBird_FilesockTransport($host !== '' && in_array($host, self::httpHosts(), true));
         return new MomoBird_SyncEngine($settings, new MomoBird_ConnectClient($settings, $transport), self::store(), self::source(), function () {
@@ -310,14 +304,42 @@ final class MomoBird_Bootstrap
         }
     }
 
-    private static function siteUrl(): string
+    /**
+     * The admin page (admincp.inc.php), wired to the Discuz! tables and this request.
+     *
+     * @param string $pageUrl the page's own admin.php URL (forms and AJAX post to it)
+     */
+    public static function adminPage(string $pageUrl, string $formhash, callable $formatTime): MomoBird_AdminPage
+    {
+        return new MomoBird_AdminPage(
+            self::store(),
+            self::source(),
+            function (MomoBird_Settings $settings) {
+                return self::engine($settings);
+            },
+            array(__CLASS__, 'saveSettings'),
+            array(
+                'supported' => self::supported(),
+                'charset' => defined('CHARSET') ? (string) CHARSET : '',
+                'formhash' => $formhash,
+                'pageUrl' => $pageUrl,
+                'scriptUrl' => 'source/plugin/momobird_ai/static/admin.js?v=' . MomoBird_AdminPage::VERSION,
+                'siteUrl' => self::siteUrl(),
+                'httpHosts' => self::httpHosts(),
+                'formatTime' => $formatTime,
+            )
+        );
+    }
+
+    /** Discuz!'s 站点 URL (全局 → 站点信息). */
+    public static function siteUrl(): string
     {
         global $_G;
         return isset($_G['setting']['siteurl']) && is_string($_G['setting']['siteurl']) ? trim($_G['setting']['siteurl']) : '';
     }
 
     /** @return string[] */
-    private static function httpHosts(): array
+    public static function httpHosts(): array
     {
         global $_G;
         $hosts = isset($_G['config']['momobird_ai']['http_hosts']) ? $_G['config']['momobird_ai']['http_hosts'] : array();

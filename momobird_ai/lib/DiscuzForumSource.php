@@ -56,7 +56,7 @@ final class MomoBird_DiscuzForumSource implements MomoBird_ForumSource
 
     public function forums(): array
     {
-        return array_values(DB::fetch_all('SELECT fid, fup, type, name, status FROM %t', array('forum_forum')));
+        return array_values(DB::fetch_all('SELECT fid, fup, type, name, status, displayorder FROM %t', array('forum_forum')));
     }
 
     public function forumFields(): array

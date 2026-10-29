@@ -19,6 +19,10 @@ final class MomoBird_Settings
     const MAX_TIMEOUT = 30;
     const KEY_PATTERN = '/^mbk_[A-Za-z0-9_-]{16,200}$/D';
     const DISCUZ_DEFAULT_SITE = 'www.discuz.vip';
+    /** kv row with toArray() (no key) */
+    const KV_SETTINGS = 'settings';
+    /** kv row with {"key": ...} */
+    const KV_SECRET = 'secret';
 
     /** Hosts that may use plain http:// for Base URL. */
     private static $localHosts = array('localhost', '127.0.0.1', '[::1]', 'host.docker.internal');
@@ -81,6 +85,21 @@ final class MomoBird_Settings
             self::flag($values, 'podcastTranscript', false),
             array_map('strtolower', array_map('strval', $extraHttpHosts))
         );
+    }
+
+    /**
+     * Settings as kept in the plugin's kv table: $values = kv `settings` (no key),
+     * $secret = kv `secret` ({"key": ...}). An empty forum address follows $siteUrl
+     * (Discuz!'s 站点 URL).
+     */
+    public static function fromStored(?array $values, ?array $secret, string $siteUrl, array $extraHttpHosts = array()): self
+    {
+        $values = is_array($values) ? $values : array();
+        $values['key'] = isset($secret['key']) && is_string($secret['key']) ? $secret['key'] : '';
+        if (!isset($values['forumUrl']) || trim((string) $values['forumUrl']) === '') {
+            $values['forumUrl'] = $siteUrl;
+        }
+        return self::fromArray($values, $extraHttpHosts);
     }
 
     /** Chinese error messages, empty when the settings are usable. */
