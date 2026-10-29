@@ -12,14 +12,18 @@ final class MomoBird_Settings
     const DEFAULT_TIMEOUT = 10;
     const MIN_TIMEOUT = 2;
     const MAX_TIMEOUT = 30;
-    const KEY_PREFIX = 'mbk_';
+    const KEY_PATTERN = '/^mbk_[A-Za-z0-9_-]{16,200}$/D';
     const DISCUZ_DEFAULT_SITE = 'www.discuz.vip';
 
     /** Hosts that may use plain http:// for Base URL. */
     private static $localHosts = array('localhost', '127.0.0.1', '[::1]', 'host.docker.internal');
 
     private $baseUrl;
-    private $key;
+    /**
+     * The key lives behind a closure, not in a plain property: var_export and
+     * (array) casts then show an empty Closure instead of the secret.
+     */
+    private $readKey;
     private $timeout;
     private $forumUrl;
     private $forumIds;
@@ -32,7 +36,9 @@ final class MomoBird_Settings
     private function __construct(string $baseUrl, string $key, int $timeout, string $forumUrl, ?array $forumIds, bool $widgetEnabled, string $widgetPosition, bool $podcastEnabled, bool $podcastTranscript, array $httpHosts)
     {
         $this->baseUrl = $baseUrl;
-        $this->key = $key;
+        $this->readKey = static function () use ($key) {
+            return $key;
+        };
         $this->timeout = $timeout;
         $this->forumUrl = $forumUrl;
         $this->forumIds = $forumIds;
@@ -81,8 +87,8 @@ final class MomoBird_Settings
         if ($problem !== null) {
             $errors[] = $problem;
         }
-        if (strpos($this->key, self::KEY_PREFIX) !== 0) {
-            $errors[] = '连接密钥应以 mbk_ 开头，请到 MomoBird 控制台的「网站接入」里重新复制。';
+        if (!preg_match(self::KEY_PATTERN, $this->key())) {
+            $errors[] = '连接密钥格式不对：应以 mbk_ 开头，后面只有字母、数字、下划线和短横线，请到 MomoBird 控制台的「网站接入」里重新复制。';
         }
         if ($this->timeout < self::MIN_TIMEOUT || $this->timeout > self::MAX_TIMEOUT) {
             $errors[] = '超时时间需要在 ' . self::MIN_TIMEOUT . ' 到 ' . self::MAX_TIMEOUT . ' 秒之间。';
@@ -103,7 +109,7 @@ final class MomoBird_Settings
     /** The connection key. Never log, store in plain tables, or print it. */
     public function key(): string
     {
-        return $this->key;
+        return (string) call_user_func($this->readKey);
     }
 
     public function timeout(): int
@@ -146,7 +152,7 @@ final class MomoBird_Settings
     /** First 8 characters of the key: what the settings page may show. */
     public function keyPrefix(): string
     {
-        return substr($this->key, 0, 8);
+        return substr($this->key(), 0, 8);
     }
 
     /** Everything except the key; fromArray($array + ['key' => ...]) rebuilds the settings. */
@@ -162,6 +168,28 @@ final class MomoBird_Settings
             'podcastEnabled' => $this->podcastEnabled,
             'podcastTranscript' => $this->podcastTranscript,
         );
+    }
+
+    /** Serialized form: everything but the key (a restored object has an empty key). */
+    public function __serialize(): array
+    {
+        return $this->toArray() + array('httpHosts' => $this->httpHosts);
+    }
+
+    public function __unserialize(array $data): void
+    {
+        $this->baseUrl = (string) ($data['baseUrl'] ?? '');
+        $this->readKey = static function () {
+            return '';
+        };
+        $this->timeout = (int) ($data['timeout'] ?? self::DEFAULT_TIMEOUT);
+        $this->forumUrl = (string) ($data['forumUrl'] ?? '');
+        $this->forumIds = self::forumIdsFrom($data['forumIds'] ?? null);
+        $this->widgetEnabled = !empty($data['widgetEnabled']);
+        $this->widgetPosition = ($data['widgetPosition'] ?? '') === 'left' ? 'left' : 'right';
+        $this->podcastEnabled = !array_key_exists('podcastEnabled', $data) || !empty($data['podcastEnabled']);
+        $this->podcastTranscript = !empty($data['podcastTranscript']);
+        $this->httpHosts = isset($data['httpHosts']) && is_array($data['httpHosts']) ? array_map('strval', $data['httpHosts']) : array();
     }
 
     /** var_dump/print_r show the same as toArray() plus the key prefix. */

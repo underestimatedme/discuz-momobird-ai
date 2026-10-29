@@ -17,6 +17,8 @@ final class MomoBird_ConnectError extends RuntimeException
     private $kind;
     private $status;
     private $apiCode;
+    private $completedResults = array();
+    private $failedIds = array();
 
     public function __construct(string $kind, string $message, int $status = 0, string $code = '', string $key = '')
     {
@@ -42,5 +44,32 @@ final class MomoBird_ConnectError extends RuntimeException
     public function code(): string
     {
         return $this->apiCode;
+    }
+
+    /**
+     * Batched calls (upsert, delete) attach where they stopped: the per-item
+     * results of the batches that already succeeded, and the ids of the batch
+     * that failed. Items after the failing batch were not attempted.
+     *
+     * @param array    $completedResults
+     * @param string[] $failedIds
+     */
+    public function withBatch(array $completedResults, array $failedIds): self
+    {
+        $this->completedResults = array_values($completedResults);
+        $this->failedIds = array_map('strval', array_values($failedIds));
+        return $this;
+    }
+
+    /** Results of the batches that succeeded before this error (empty for non-batch calls). */
+    public function getCompletedResults(): array
+    {
+        return $this->completedResults;
+    }
+
+    /** external_ids of the batch that failed (empty for non-batch calls). */
+    public function getFailedIds(): array
+    {
+        return $this->failedIds;
     }
 }

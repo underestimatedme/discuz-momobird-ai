@@ -139,3 +139,29 @@ mb_test('filesock transport works through the client and keeps the key out of er
     mb_assert_same('NETWORK', $error->kind(), 'kind');
     mb_assert(stripos($error->getMessage(), 'mbk_') === false, 'key leaked through the transport error');
 });
+
+mb_test('filesock transport keeps an admin-configured CA file for verifypeer', function () {
+    $saved = isset($GLOBALS['_G']) ? $GLOBALS['_G'] : null;
+    try {
+        foreach (array(
+            'a CA path' => array('/etc/ssl/certs/ca.pem', '/etc/ssl/certs/ca.pem'),
+            'false' => array(false, true),
+            'true' => array(true, true),
+            'empty string' => array('', true),
+            'null' => array(null, true),
+        ) as $name => $case) {
+            $GLOBALS['_G'] = array('config' => array('security' => array('fsockopensafe' => array('verifypeer' => $case[0]))));
+            mb_fs_send();
+            mb_assert_same($case[1], filesock::$opened[0]['verifypeer'], "verifypeer for config $name");
+        }
+        unset($GLOBALS['_G']);
+        mb_fs_send();
+        mb_assert_same(true, filesock::$opened[0]['verifypeer'], 'verifypeer without any Discuz config');
+    } finally {
+        if ($saved === null) {
+            unset($GLOBALS['_G']);
+        } else {
+            $GLOBALS['_G'] = $saved;
+        }
+    }
+});

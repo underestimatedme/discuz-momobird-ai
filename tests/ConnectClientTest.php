@@ -368,3 +368,142 @@ mb_test('a transport answering garbage becomes a network error', function () {
     });
     mb_assert_same('NETWORK', $error->kind(), 'kind');
 });
+
+mb_test('the client refuses to send anything with invalid settings', function () {
+    $invalid = array(
+        'http base url' => array('baseUrl' => 'http://evil.example'),
+        'base url with path' => array('baseUrl' => 'https://api.example.com/x'),
+        'bad key' => array('key' => 'not-a-key'),
+        'empty key' => array('key' => ''),
+        'timeout 0' => array('timeout' => 0),
+        'timeout 1' => array('timeout' => 1),
+        'timeout 31' => array('timeout' => 31),
+        'non numeric timeout' => array('timeout' => 'soon'),
+        'bad forum url' => array('forumUrl' => 'https://www.discuz.vip/'),
+    );
+    foreach ($invalid as $name => $override) {
+        $calls = array(
+            'status' => function ($c) { $c->status(); },
+            'listPosts' => function ($c) { $c->listPosts(null); },
+            'upsert' => function ($c) { $c->upsert(array(mb_cc_post(1))); },
+            'delete' => function ($c) { $c->delete(array(1)); },
+            'enableWidget' => function ($c) { $c->enableWidget(); },
+        );
+        foreach ($calls as $method => $call) {
+            $transport = new MomoBird_FakeTransport(mb_cc_echo_results());
+            $client = mb_cc_client($transport, $override);
+            $error = mb_assert_throws(function () use ($client, $call) {
+                $call($client);
+            }, 'MomoBird_ConnectError');
+            mb_assert_same(0, count($transport->requests), "$name/$method: a request was sent with invalid settings");
+            mb_assert_same('REJECTED', $error->kind(), "$name/$method: kind");
+            mb_assert_same('invalid_settings', $error->code(), "$name/$method: code");
+            mb_assert(preg_match('/\p{Han}/u', $error->getMessage()) === 1, "$name/$method: message should be Chinese");
+            mb_assert(stripos($error->getMessage(), MB_TEST_KEY) === false, "$name/$method: key in message");
+        }
+    }
+});
+
+mb_test('a failed upsert batch carries the finished results and the failing ids', function () {
+    $transport = (new MomoBird_FakeTransport())
+        ->push(mb_cc_echo_results())
+        ->push(array('status' => 400, 'body' => '{"code":"VALIDATION_FAILED","message":"bad"}'));
+    $posts = array();
+    for ($i = 1; $i <= 50; $i++) {
+        $posts[] = mb_cc_post($i);
+    }
+    $error = mb_cc_error($transport, function ($client) use ($posts) {
+        $client->upsert($posts);
+    });
+    mb_assert_same('REJECTED', $error->kind(), 'kind');
+    mb_assert_same(2, count($transport->requests), 'the client stops at the failing batch');
+    mb_assert_same(array_map('strval', range(1, 20)), array_column($error->getCompletedResults(), 'external_id'), 'results of the batch that succeeded');
+    mb_assert_same('created', $error->getCompletedResults()[0]['status'], 'completed result content');
+    mb_assert_same(array_map('strval', range(21, 40)), $error->getFailedIds(), 'ids of the failing batch');
+});
+
+mb_test('completed results include posts rejected in place before the failure', function () {
+    $transport = (new MomoBird_FakeTransport())
+        ->push(mb_cc_echo_results())
+        ->push(array('status' => 503, 'body' => ''));
+    $posts = array(mb_cc_post(1), mb_cc_post(2, str_repeat('c', 5 * 1024 * 1024)), mb_cc_post(3));
+    $error = mb_cc_error($transport, function ($client) use ($posts) {
+        $client->upsert($posts);
+    });
+    mb_assert_same(array('1', '2'), array_column($error->getCompletedResults(), 'external_id'), 'first batch and the oversized post');
+    mb_assert_same(array('created', 'rejected'), array_column($error->getCompletedResults(), 'status'), 'statuses');
+    mb_assert_same(array('3'), $error->getFailedIds(), 'failing batch');
+});
+
+mb_test('a network failure on the first batch has no completed results', function () {
+    $transport = (new MomoBird_FakeTransport())->push(array('status' => 0, 'error' => 'timeout'));
+    $error = mb_cc_error($transport, function ($client) {
+        $client->upsert(array(mb_cc_post(7), mb_cc_post(8)));
+    });
+    mb_assert_same(array(), $error->getCompletedResults(), 'completed');
+    mb_assert_same(array('7', '8'), $error->getFailedIds(), 'failed ids');
+    $other = mb_cc_error((new MomoBird_FakeTransport())->push(array('status' => 500, 'body' => '')), function ($client) {
+        $client->status();
+    });
+    mb_assert_same(array(), $other->getCompletedResults(), 'non-batch errors have no results');
+    mb_assert_same(array(), $other->getFailedIds(), 'non-batch errors have no failed ids');
+});
+
+mb_test('a failed delete batch carries the finished results and the failing ids', function () {
+    $transport = (new MomoBird_FakeTransport())
+        ->push(mb_cc_echo_results())
+        ->push(array('status' => 500, 'body' => ''));
+    $error = mb_cc_error($transport, function ($client) {
+        $client->delete(range(1, 150));
+    });
+    mb_assert_same(100, count($error->getCompletedResults()), 'first delete batch done');
+    mb_assert_same(array_map('strval', range(101, 150)), $error->getFailedIds(), 'second batch failed');
+});
+
+mb_test('upsert results are matched to the ids that were sent', function () {
+    // Reordered response, an extra id, and id 3 missing.
+    $transport = (new MomoBird_FakeTransport())->push(mb_cc_ok(array('results' => array(
+        array('external_id' => '2', 'document_id' => 'd2', 'status' => 'updated', 'error_code' => null),
+        array('external_id' => '99', 'document_id' => 'd99', 'status' => 'created', 'error_code' => null),
+        array('external_id' => '1', 'document_id' => 'd1', 'status' => 'created', 'error_code' => null),
+    ))));
+    $results = mb_cc_client($transport)->upsert(array(mb_cc_post(1), mb_cc_post(2), mb_cc_post(3)));
+
+    mb_assert_same(array('1', '2', '3'), array_column($results, 'external_id'), 'results follow the order sent');
+    mb_assert_same(array('created', 'updated', 'rejected'), array_column($results, 'status'), 'statuses');
+    mb_assert_same('MISSING_RESULT', $results[2]['error_code'], 'a post the server did not answer is a failed result');
+});
+
+/** Trace frames inside the plugin's own classes (frames of the test harness hold test doubles). */
+function mb_cc_plugin_trace(Throwable $error): string
+{
+    $frames = array();
+    foreach ($error->getTrace() as $frame) {
+        if (isset($frame['class']) && in_array($frame['class'], array('MomoBird_ConnectClient', 'MomoBird_ConnectError', 'MomoBird_Redactor', 'MomoBird_Settings'), true)) {
+            $frames[] = $frame;
+        }
+    }
+    return var_export($frames, true);
+}
+
+mb_test('no exception trace argument carries the key', function () {
+    $responses = array(
+        array('status' => 0, 'error' => 'refused; Authorization: Bearer ' . MB_TEST_KEY),
+        array('status' => 401, 'body' => '{"code":"UNAUTHORIZED","message":"' . MB_TEST_KEY . '"}'),
+    );
+    foreach ($responses as $response) {
+        $error = mb_cc_error((new MomoBird_FakeTransport())->push($response), function ($client) {
+            $client->status();
+        });
+        mb_assert(strpos(mb_cc_plugin_trace($error), 'DISCUZLOCAL') === false, 'the key is in the trace arguments');
+        mb_assert(strpos(mb_cc_plugin_trace($error), 'ConnectClient') !== false, 'trace helper found no plugin frames');
+    }
+    $thrower = new MomoBird_FakeTransport(function () {
+        throw new RuntimeException('exploded ' . MB_TEST_KEY);
+    });
+    $error = mb_cc_error($thrower, function ($client) {
+        $client->status();
+    });
+    mb_assert(strpos(mb_cc_plugin_trace($error), 'DISCUZLOCAL') === false, 'the key is in the trace arguments (throwing transport)');
+    mb_assert_same(null, $error->getPrevious(), 'the raw transport exception is not chained');
+});

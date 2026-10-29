@@ -48,7 +48,7 @@ final class MomoBird_FilesockTransport implements MomoBird_Transport
             'conntimeout' => min($timeout, self::MAX_CONNECT_TIMEOUT),
             'failonerror' => false,
             'returnbody' => true,
-            'verifypeer' => true,
+            'verifypeer' => self::verifyPeer(),
             'useragent' => self::USER_AGENT,
             'limit' => self::MAX_RESPONSE_BYTES + 1,
             'allowcurl' => true,
@@ -80,6 +80,21 @@ final class MomoBird_FilesockTransport implements MomoBird_Transport
         }
 
         return array('status' => $status, 'body' => (string) $result, 'error' => null);
+    }
+
+    /**
+     * TLS verification is always on. If the admin configured a CA file in
+     * $_config['security']['fsockopensafe']['verifypeer'] (a path string),
+     * keep it: on hosts without a system CA bundle it is the only way that works.
+     *
+     * @return bool|string
+     */
+    private static function verifyPeer()
+    {
+        $configured = isset($GLOBALS['_G']['config']['security']['fsockopensafe']['verifypeer'])
+            ? $GLOBALS['_G']['config']['security']['fsockopensafe']['verifypeer']
+            : null;
+        return is_string($configured) && $configured !== '' ? $configured : true;
     }
 
     /** @param string[] $lines "Name: value" */

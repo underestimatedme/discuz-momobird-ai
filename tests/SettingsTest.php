@@ -61,13 +61,19 @@ mb_test('base url rejects credentials, query, fragment and paths', function () {
     mb_assert(count(mb_settings(array('baseUrl' => ''))->validate()) === 1, 'empty base url should be rejected');
 });
 
-mb_test('key must start with mbk_', function () {
-    foreach (array('', 'abc', 'mbk', 'MBK_x', 'xmbk_abc') as $bad) {
-        $errors = mb_settings(array('key' => $bad))->validate();
-        mb_assert_same(1, count($errors), 'expected one error for key ' . var_export($bad, true));
-        mb_assert(strpos($errors[0], 'mbk_') !== false, 'error should explain the prefix');
+mb_test('key must be mbk_ followed by 16 to 200 url-safe characters', function () {
+    $bad = array('', 'abc', 'mbk', 'MBK_xxxxxxxxxxxxxxxxxxxx', 'xmbk_abcdefghijklmnopqrstu', 'mbk_short', 'mbk_' . str_repeat('a', 15), 'mbk_' . str_repeat('a', 201),
+        "mbk_abcdefghijklmnop\r\nX-Evil: 1", 'mbk_abcdefghij klmnopqrstu', 'mbk_abcdefghijklmnop!', 'mbk_密钥密钥密钥密钥密钥密钥密钥密钥');
+    foreach ($bad as $key) {
+        $errors = mb_settings(array('key' => $key))->validate();
+        mb_assert_same(1, count($errors), 'expected one error for key ' . var_export($key, true));
+        mb_assert(strpos($errors[0], 'mbk_') !== false, 'error should explain the format');
+        mb_assert(strlen($key) < 8 || strpos($errors[0], $key) === false, 'error must not echo the key');
+        mb_assert(preg_match('/\p{Han}/u', $errors[0]) === 1, 'error should be Chinese');
     }
-    mb_assert_same(array(), mb_settings(array('key' => 'mbk_abc'))->validate(), 'any mbk_ key is accepted');
+    foreach (array('mbk_' . str_repeat('a', 16), 'mbk_' . str_repeat('Z_-9', 50), MB_TEST_KEY) as $key) {
+        mb_assert_same(array(), mb_settings(array('key' => $key))->validate(), 'should accept ' . $key);
+    }
 });
 
 mb_test('timeout is 2 to 30 seconds', function () {
@@ -134,4 +140,34 @@ mb_test('toArray never contains the key and keyPrefix is 8 chars', function () {
     mb_assert_same(array(3, 4), $array['forumIds'], 'forum ids in array');
     $again = MomoBird_Settings::fromArray($array + array('key' => MB_TEST_KEY));
     mb_assert_same($array, $again->toArray(), 'round trip');
+});
+
+mb_test('the key does not leak through serialize, var_export, var_dump, print_r or casts', function () {
+    $s = mb_settings(array('forumIds' => array(1)));
+    $dumps = array(
+        'serialize' => serialize($s),
+        'var_export' => var_export($s, true),
+        'print_r' => print_r($s, true),
+        'json_encode' => json_encode($s),
+        'cast var_export' => var_export((array) $s, true),
+        'cast serialize-ish' => json_encode(array_map('gettype', (array) $s)),
+    );
+    ob_start();
+    var_dump($s);
+    $dumps['var_dump'] = ob_get_clean();
+    foreach ($dumps as $name => $text) {
+        mb_assert(strpos($text, MB_TEST_KEY) === false, $name . ' leaked the key');
+        mb_assert(strpos($text, 'DISCUZLOCAL') === false, $name . ' leaked part of the key');
+    }
+});
+
+mb_test('serialized settings keep everything except the key', function () {
+    $s = mb_settings(array('forumIds' => array(3, 4), 'widgetEnabled' => true, 'timeout' => 12), array('mock-connect'));
+    $again = unserialize(serialize($s));
+    mb_assert(get_class($again) === 'MomoBird_Settings', 'class');
+    mb_assert_same($s->toArray(), $again->toArray(), 'fields survive');
+    mb_assert_same('', $again->key(), 'the key does not survive');
+    mb_assert_same('', $again->keyPrefix(), 'no key prefix either');
+    mb_assert_same($s->key(), $s->key(), 'the original still has its key');
+    mb_assert_same(MB_TEST_KEY, (clone $s)->key(), 'clones keep the key');
 });

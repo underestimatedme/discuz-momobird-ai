@@ -66,12 +66,21 @@ final class MomoBird_ConnectClient
      * would not fit, or cannot be encoded, is not sent: it gets a `rejected`
      * result (TOO_LARGE / INVALID) in its place, and the rest go on.
      *
+     * A post the server's answer does not mention gets a `rejected` /
+     * MISSING_RESULT result. If a request fails, the thrown error carries the
+     * results so far and the failing batch's ids (MomoBird_ConnectError::withBatch);
+     * splitting and re-pushing that batch is the engine's job, not the client's.
+     *
      * @return array one result per post, in input order: external_id, document_id, status, error_code
      */
     public function upsert(array $posts): array
     {
+        if ($posts) {
+            $this->assertUsable();
+        }
         $results = array();
         $batch = array();
+        $batchIds = array();
         $bytes = self::UPSERT_ENVELOPE_BYTES;
 
         foreach (array_values($posts) as $post) {
@@ -84,8 +93,9 @@ final class MomoBird_ConnectClient
                 $rejection = 'TOO_LARGE';
             }
             if ($rejection !== null) {
-                $results = array_merge($results, $this->flushUpsert($batch));
+                $results = array_merge($results, $this->flushUpsert($batch, $batchIds, $results));
                 $batch = array();
+                $batchIds = array();
                 $bytes = self::UPSERT_ENVELOPE_BYTES;
                 $results[] = array('external_id' => $id, 'document_id' => null, 'status' => 'rejected', 'error_code' => $rejection);
                 continue;
@@ -93,16 +103,18 @@ final class MomoBird_ConnectClient
 
             $added = strlen($json) + ($batch ? 1 : 0);
             if (count($batch) >= self::MAX_UPSERT_POSTS || $bytes + $added > self::MAX_REQUEST_BYTES) {
-                $results = array_merge($results, $this->flushUpsert($batch));
+                $results = array_merge($results, $this->flushUpsert($batch, $batchIds, $results));
                 $batch = array();
+                $batchIds = array();
                 $bytes = self::UPSERT_ENVELOPE_BYTES;
                 $added = strlen($json);
             }
             $batch[] = $json;
+            $batchIds[] = $id;
             $bytes += $added;
         }
 
-        return array_merge($results, $this->flushUpsert($batch));
+        return array_merge($results, $this->flushUpsert($batch, $batchIds, $results));
     }
 
     /**
@@ -114,10 +126,17 @@ final class MomoBird_ConnectClient
     public function delete(array $ids): array
     {
         $ids = array_map('strval', array_values($ids));
+        if ($ids) {
+            $this->assertUsable();
+        }
         $results = array();
         foreach (array_chunk($ids, self::MAX_DELETE_IDS) as $chunk) {
-            $data = $this->request('POST', '/posts/delete', json_encode(array('external_ids' => $chunk), self::JSON_FLAGS));
-            $results = array_merge($results, $this->results($data, array('deleted', 'not_found')));
+            try {
+                $data = $this->request('POST', '/posts/delete', json_encode(array('external_ids' => $chunk), self::JSON_FLAGS));
+                $results = array_merge($results, $this->results($data, array('deleted', 'not_found')));
+            } catch (MomoBird_ConnectError $error) {
+                throw $error->withBatch($results, $chunk);
+            }
         }
         return $results;
     }
@@ -128,14 +147,35 @@ final class MomoBird_ConnectClient
         return $this->request('POST', '/widget/enable', '{}');
     }
 
-    /** @param string[] $encodedPosts */
-    private function flushUpsert(array $encodedPosts): array
+    /**
+     * @param string[] $encodedPosts
+     * @param string[] $ids          external_ids of those posts
+     * @param array    $doneSoFar    results already collected, for the error
+     */
+    private function flushUpsert(array $encodedPosts, array $ids, array $doneSoFar): array
     {
         if (!$encodedPosts) {
             return array();
         }
-        $data = $this->request('PUT', '/posts', '{"posts":[' . implode(',', $encodedPosts) . ']}');
-        return $this->results($data, array('created', 'updated', 'unchanged', 'rejected'));
+        try {
+            $data = $this->request('PUT', '/posts', '{"posts":[' . implode(',', $encodedPosts) . ']}');
+            $answers = $this->results($data, array('created', 'updated', 'unchanged', 'rejected'));
+        } catch (MomoBird_ConnectError $error) {
+            throw $error->withBatch($doneSoFar, $ids);
+        }
+
+        // Match by id: the answer may be reordered, padded or short.
+        $byId = array();
+        foreach ($answers as $answer) {
+            $byId[$answer['external_id']] = $answer;
+        }
+        $results = array();
+        foreach ($ids as $id) {
+            $results[] = isset($byId[$id])
+                ? $byId[$id]
+                : array('external_id' => $id, 'document_id' => null, 'status' => 'rejected', 'error_code' => 'MISSING_RESULT');
+        }
+        return $results;
     }
 
     private function results(array $data, array $statuses): array
@@ -152,9 +192,22 @@ final class MomoBird_ConnectClient
         return array_values($data['results']);
     }
 
+    /**
+     * Never send with settings validate() rejects: an http:// Base URL would
+     * carry the key in clear text, and a timeout of 0 means "no timeout" in curl.
+     */
+    private function assertUsable(): void
+    {
+        $problems = $this->settings->validate();
+        if ($problems) {
+            throw $this->error(MomoBird_ConnectError::REJECTED, '连接设置有误，没有发送任何请求：' . implode(' ', $problems), 0, 'invalid_settings');
+        }
+    }
+
     /** @param ?string $json already encoded request body */
     private function request(string $method, string $path, ?string $json): array
     {
+        $this->assertUsable();
         $headers = array(
             'Accept: application/json',
             'Authorization: Bearer ' . $this->settings->key(),
@@ -166,7 +219,9 @@ final class MomoBird_ConnectClient
         try {
             $response = $this->transport->send($method, $this->settings->baseUrl() . self::API_PREFIX . $path, $headers, $json, $this->settings->timeout());
         } catch (Throwable $e) {
-            throw $this->error(MomoBird_ConnectError::NETWORK, '无法连接 MomoBird：' . $e->getMessage());
+            // Redact before the message becomes an argument of error(): with
+            // zend.exception_ignore_args off it would sit in the trace as-is.
+            throw $this->error(MomoBird_ConnectError::NETWORK, '无法连接 MomoBird：' . $this->scrub($e->getMessage()));
         }
 
         if (!is_array($response) || !isset($response['status']) || !is_int($response['status'])
@@ -177,24 +232,30 @@ final class MomoBird_ConnectClient
         $status = $response['status'];
         $raw = $response['body'];
         if (!empty($response['error']) || $status === 0) {
-            $detail = !empty($response['error']) ? $response['error'] : '没有收到 HTTP 响应';
+            $detail = !empty($response['error']) ? $this->scrub($response['error']) : '没有收到 HTTP 响应';
             throw $this->error(MomoBird_ConnectError::NETWORK, '无法连接 MomoBird：' . $detail);
         }
         if (strlen($raw) > self::MAX_RESPONSE_BYTES) {
             throw $this->error(MomoBird_ConnectError::HTTP, 'MomoBird 的响应超过了 5 MB，已丢弃。', $status, 'response_too_large');
         }
         if ($status === 200) {
-            return $this->unwrap($raw, $status);
+            $data = self::unwrap($raw);
+            if ($data === null) {
+                // Thrown here, not inside unwrap(): a frame with the raw body as argument would sit in the trace.
+                throw $this->error(MomoBird_ConnectError::HTTP, 'MomoBird 返回的内容格式不对。', $status, 'malformed_response');
+            }
+            return $data;
         }
-        throw $this->failure($status, $raw);
+        // Scrubbed first: the body is an argument of failure() and so of its trace frame.
+        throw $this->failure($status, $this->scrub($raw));
     }
 
-    private function unwrap(string $raw, int $status): array
+    private static function unwrap(string $raw): ?array
     {
         $decoded = json_decode($raw, true);
         if (!is_array($decoded) || !isset($decoded['code']) || $decoded['code'] !== 'OK'
             || !array_key_exists('data', $decoded) || !is_array($decoded['data'])) {
-            throw $this->error(MomoBird_ConnectError::HTTP, 'MomoBird 返回的内容格式不对。', $status, 'malformed_response');
+            return null;
         }
         return $decoded['data'];
     }
@@ -249,6 +310,11 @@ final class MomoBird_ConnectClient
     private function error(string $kind, string $message, int $status = 0, string $code = ''): MomoBird_ConnectError
     {
         return new MomoBird_ConnectError($kind, $message, $status, $code, $this->settings->key());
+    }
+
+    private function scrub(string $text): string
+    {
+        return MomoBird_Redactor::clean($text, $this->settings->key());
     }
 
     /** At most MAX_MESSAGE_CHARS characters, never cutting a UTF-8 sequence. */
