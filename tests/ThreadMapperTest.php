@@ -69,6 +69,16 @@ mb_test('mapper prefers the X5 json content over the message summary', function 
     mb_assert(strpos($payload['content'], '摘要') === false, 'summary leaked');
 });
 
+mb_test('mapper adds text appended to an X5 json post after the blocks, as viewthread does', function () {
+    $json = json_encode(array('type' => 'json', 'editor' => 'jsonEditor', 'content' => json_encode(array('blocks' => array(
+        array('type' => 'paragraph', 'data' => array('text' => '正文块')),
+    )))));
+    $message = "摘要;\n\n[postappend][b]补充内容 (2026-10-29 22:56):[/b]\n追加 [hide]秘密[/hide]文字[/postappend]";
+    $payload = MomoBird_ThreadMapper::payload(mb_map_thread(), mb_map_post(array('content' => $json, 'message' => $message)), '', 'https://x/');
+    mb_assert_same("正文块\n\n补充内容 (2026-10-29 22:56):\n追加 文字", $payload['content'], 'json text then the append');
+    mb_assert(strpos($payload['content'], '摘要') === false && strpos($payload['content'], '秘密') === false, 'summary or hidden text: ' . $payload['content']);
+});
+
 mb_test('mapper falls back to bbcode when the json is missing or unusable', function () {
     foreach (array(null, '', 'not json', '{"content":{"blocks":[]}}', '[]') as $content) {
         $payload = MomoBird_ThreadMapper::payload(mb_map_thread(), mb_map_post(array('content' => $content, 'message' => '[b]粗体[/b] 文字')), '', 'https://x/');

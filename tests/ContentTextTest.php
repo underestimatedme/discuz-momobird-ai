@@ -110,12 +110,12 @@ mb_test('content never contains hidden text', function () {
         'A[i=s]x[hide]SECRET_CROSS3[/i]SECRET_CROSS4[/hide]B',
         'A[hide]x[quote]SECRET_CROSS5[/hide]SECRET_CROSS6[/quote]B',
         '[groupid=1]SECRET_GROUP[/groupid]',
-        '[postappend]SECRET_APPEND[/postappend]',
+        '[postappend]补充 [hide]SECRET_IN_APPEND[/hide]可见补充[/postappend]',
         '可见结尾',
         '[hide]SECRET_UNCLOSED',
     )) . $nul . 'SECRET_SPECIAL_DATA';
     $out = mb_bb($message);
-    mb_assert(strpos($out, '可见开头') !== false && strpos($out, '可见结尾') !== false, 'visible text was lost: ' . $out);
+    mb_assert(strpos($out, '可见开头') !== false && strpos($out, '可见结尾') !== false && strpos($out, '可见补充') !== false, 'visible text was lost: ' . $out);
     mb_assert(strpos($out, 'SECRET') === false, 'hidden text leaked: ' . $out);
     mb_assert(!preg_match('/\[\/?(hide|quote|attach|attachimg|img|media|audio|flash|swf|payto|password|groupid|postappend|i)\b/i', $out), 'hidden tag markup left behind: ' . $out);
 });
@@ -138,9 +138,17 @@ mb_test('a password tag blanks the whole post', function () {
     mb_assert_same('', mb_bb('PUBLIC [PASSWORD=x]pw'), 'unclosed password tag should blank the post');
 });
 
-mb_test('groupid and postappend spans are removed', function () {
+mb_test('groupid spans are removed; postappend keeps its text like X5 viewthread', function () {
     mb_assert_same('ab', mb_bb('a[groupid=7]SECRET[/groupid]b'), 'groupid leaked');
-    mb_assert_same('ab', mb_bb('a[postappend]SECRET[/postappend]b'), 'postappend leaked');
+    // X5's misc postappend wraps the appended text in [postappend]; viewthread shows it to everyone.
+    mb_assert_same("正文\n\n补充内容：追加的文字", mb_bb("正文\n\n[postappend][b]补充内容：[/b]追加的文字[/postappend]"), 'appended text');
+    mb_assert_same('a补充b', mb_bb('a[postappend]补充[hide]SECRET[/hide][/postappend]b'), 'hidden text inside the append');
+    mb_assert_same('a补充', mb_bb('a[postappend]补充'), 'an unclosed append keeps its text');
+});
+
+mb_test('postAppends returns the appended spans of a message', function () {
+    mb_assert_same('', MomoBird_ContentText::postAppends('摘要'), 'none');
+    mb_assert_same("一\n\n二", MomoBird_ContentText::postAppends("摘要[postappend]一[/postappend]中间[postappend]二[/postappend]"), 'two spans');
 });
 
 mb_test('oversized input is cut at 2 MiB on a character boundary', function () {

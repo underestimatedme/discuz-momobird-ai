@@ -17,7 +17,7 @@ if (!defined('IN_DISCUZ')) {
 class MomoBird_ContentText
 {
     /** Tags that wrap hidden or duplicated content; nesting is tracked and an unclosed one swallows the rest. */
-    private static $guardedTags = array('hide', 'quote', 'groupid', 'postappend');
+    private static $guardedTags = array('hide', 'quote', 'groupid');
 
     /** Tags whose whole span is dropped (no nesting expected). */
     private static $dropTags = array('attach', 'attachimg', 'img', 'media', 'audio', 'flash', 'swf', 'payto');
@@ -28,8 +28,11 @@ class MomoBird_ContentText
     /** A [password] tag anywhere: Discuz shows guests an empty post, so the text is empty here too. */
     const PASSWORD_PATTERN = '/\[password(?:=[^\]]{0,200})?\]/i';
 
-    /** Tags that only format: the markup goes, the text stays. */
-    private static $keepTextTags = array('b', 'i', 'u', 's', 'p', 'color', 'backcolor', 'size', 'font', 'align', 'indent', 'float', 'free', 'md', 'url', 'code', 'email', 'table', 'tr', 'th', 'td', 'list', 'password');
+    /**
+     * Tags that only format: the markup goes, the text stays. [postappend] wraps text the author
+     * appended (X5 misc postappend); X5's viewthread drops the markers and shows the text to everyone.
+     */
+    private static $keepTextTags = array('b', 'i', 'u', 's', 'p', 'color', 'backcolor', 'size', 'font', 'align', 'indent', 'float', 'free', 'md', 'url', 'code', 'email', 'table', 'tr', 'th', 'td', 'list', 'password', 'postappend');
 
     /**
      * Discuz! post message (BBCode, optionally with HTML) to plain text.
@@ -114,6 +117,19 @@ class MomoBird_ContentText
         $text = self::replace('/\n{3,}/', "\n\n", $text);
 
         return trim($text);
+    }
+
+    /**
+     * The text appended to a post with X5's postappend ([postappend]...[/postappend] in the message),
+     * still BBCode, spans joined by a blank line. X5's viewthread shows it after a JSON editor post.
+     */
+    public static function postAppends(string $message): string
+    {
+        $message = self::utf8(self::cap($message));
+        if (stripos($message, '[postappend]') === false || preg_match_all('/\[postappend\](.*?)\[\/postappend\]/is', $message, $m) < 1) {
+            return '';
+        }
+        return implode("\n\n", $m[1]);
     }
 
     /**

@@ -62,6 +62,12 @@ final class MomoBird_ThreadMapper
             if ($text !== null) {
                 // Valid JSON that holds no text (only images) is an empty post, not a reason
                 // to fall back to the message, which is just a summary of the same content.
+                // Text appended later lives in the message only; viewthread shows it after the blocks.
+                $appended = MomoBird_ContentText::postAppends((string) ($firstPost['message'] ?? ''));
+                if ($appended !== '') {
+                    $appended = MomoBird_ContentText::fromBbcode($appended);
+                    $text = trim($text . ($text !== '' && $appended !== '' ? "\n\n" : '') . $appended);
+                }
                 return $text;
             }
         }
