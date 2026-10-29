@@ -3,6 +3,11 @@
  * What one engine call did. Counters are per call; messages are Chinese and
  * already redacted (they come from MomoBird_ConnectError or the engine).
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 final class MomoBird_SyncResult
 {
     /** drain|cron|full|retry|confirm */

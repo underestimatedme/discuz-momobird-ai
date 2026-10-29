@@ -4,6 +4,11 @@
  * thread lives under. The same function feeds the push payload and the
  * front-end data-category attribute, so both sides always agree.
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 final class MomoBird_Categories
 {
     /** The backend rejects a post whose category is longer than this many characters. */

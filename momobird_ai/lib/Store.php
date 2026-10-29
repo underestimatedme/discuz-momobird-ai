@@ -33,6 +33,11 @@
  *
  * Locks: lock()/unlock() give one engine run at a time (the adapter keeps them as kv rows; see MomoBird_DiscuzStore).
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 interface MomoBird_Store
 {
     /** @return array<int, array> tid => row (every column, priority and queued_at included), for the tids that have a row */

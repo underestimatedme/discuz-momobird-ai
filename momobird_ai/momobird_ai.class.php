@@ -12,10 +12,12 @@
  *     deletethread            thread deleted or moved to the recycle bin
  *     deletepost              posts deleted by thread id
  *     undeletethreads         threads restored from the recycle bin
+ *     threadpubsave           a draft published
  *   plugin_momobird_ai_forum / mobileplugin_momobird_ai_forum (forum.php):
  *     post_momobird_ai_message        new thread, edit, delete from the edit page
  *     topicadmin_momobird_ai_message  front-end thread management
  *     modcp_momobird_ai_message       moderator panel: moderation queue, recycle bin
+ *     misc_momobird_ai_message        text appended to a post
  *     viewthread_postbottom(_mobile)_output  podcast placeholder under the first post
  */
 
@@ -32,30 +34,38 @@ class plugin_momobird_ai {
 	}
 
 	public function deletethread($param) {
-		MomoBird_Bootstrap::enqueue(MomoBird_Hooks::deleteThreadTids((array) $param), 'deletethread');
+		MomoBird_Bootstrap::hook('deletethread', $param);
 	}
 
 	public function deletepost($param) {
-		MomoBird_Bootstrap::enqueue(MomoBird_Hooks::deletePostTids((array) $param), 'deletepost');
+		MomoBird_Bootstrap::hook('deletepost', $param);
 	}
 
 	public function undeletethreads($param) {
-		MomoBird_Bootstrap::enqueue(MomoBird_Hooks::undeleteTids((array) $param), 'undeletethreads');
+		MomoBird_Bootstrap::hook('undeletethreads', $param);
+	}
+
+	public function threadpubsave($param) {
+		MomoBird_Bootstrap::hook('threadpubsave', $param);
 	}
 }
 
 class plugin_momobird_ai_forum {
 
 	public function post_momobird_ai_message($param) {
-		MomoBird_Bootstrap::enqueue(MomoBird_Hooks::messageTids((array) $param), 'post');
+		MomoBird_Bootstrap::hook('post', $param);
+	}
+
+	public function misc_momobird_ai_message($param) {
+		MomoBird_Bootstrap::hook('misc', $param);
 	}
 
 	public function topicadmin_momobird_ai_message($param) {
-		MomoBird_Bootstrap::moderation('topicadmin');
+		MomoBird_Bootstrap::moderation('topicadmin', $param);
 	}
 
 	public function modcp_momobird_ai_message($param) {
-		MomoBird_Bootstrap::moderation('modcp');
+		MomoBird_Bootstrap::moderation('modcp', $param);
 	}
 
 	public function viewthread_postbottom_output() {
@@ -70,30 +80,38 @@ class mobileplugin_momobird_ai {
 	}
 
 	public function deletethread($param) {
-		MomoBird_Bootstrap::enqueue(MomoBird_Hooks::deleteThreadTids((array) $param), 'deletethread');
+		MomoBird_Bootstrap::hook('deletethread', $param);
 	}
 
 	public function deletepost($param) {
-		MomoBird_Bootstrap::enqueue(MomoBird_Hooks::deletePostTids((array) $param), 'deletepost');
+		MomoBird_Bootstrap::hook('deletepost', $param);
 	}
 
 	public function undeletethreads($param) {
-		MomoBird_Bootstrap::enqueue(MomoBird_Hooks::undeleteTids((array) $param), 'undeletethreads');
+		MomoBird_Bootstrap::hook('undeletethreads', $param);
+	}
+
+	public function threadpubsave($param) {
+		MomoBird_Bootstrap::hook('threadpubsave', $param);
 	}
 }
 
 class mobileplugin_momobird_ai_forum {
 
 	public function post_momobird_ai_message($param) {
-		MomoBird_Bootstrap::enqueue(MomoBird_Hooks::messageTids((array) $param), 'post');
+		MomoBird_Bootstrap::hook('post', $param);
+	}
+
+	public function misc_momobird_ai_message($param) {
+		MomoBird_Bootstrap::hook('misc', $param);
 	}
 
 	public function topicadmin_momobird_ai_message($param) {
-		MomoBird_Bootstrap::moderation('topicadmin');
+		MomoBird_Bootstrap::moderation('topicadmin', $param);
 	}
 
 	public function modcp_momobird_ai_message($param) {
-		MomoBird_Bootstrap::moderation('modcp');
+		MomoBird_Bootstrap::moderation('modcp', $param);
 	}
 
 	public function viewthread_postbottom_mobile_output() {

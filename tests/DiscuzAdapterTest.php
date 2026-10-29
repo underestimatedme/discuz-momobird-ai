@@ -63,3 +63,26 @@ mb_test('discuz adapter: an empty bbclosed (fresh install) means the forum is op
     mb_assert_same('site_closed', MomoBird_Visibility::site(array('allowvisit' => 1), array()), 'missing row still fails closed');
     unset($GLOBALS['mb_da_tables']);
 });
+
+mb_test('discuz adapter: a failed settings save never shows the key', function () {
+    require_once __DIR__ . '/FakeStore.php';
+    $key = 'mbk_DISCUZLOCALTESTKEYDISCUZLOCALTESTKEYDISC';
+    $store = new class extends MomoBird_FakeStore {
+        public function set(string $key, ?array $value): void
+        {
+            // Like a DbException: the failing SQL, values included.
+            throw new RuntimeException("Table 'pre_momobird_ai_kv' doesn't exist: INSERT INTO pre_momobird_ai_kv (k, v) VALUES ('secret', '" . json_encode($value) . "')");
+        }
+    };
+    MomoBird_Bootstrap::useStore($store);
+    try {
+        $error = mb_assert_throws(function () use ($key) {
+            MomoBird_Bootstrap::saveSettings(array('baseUrl' => 'https://api.valley.atlaspaces.com'), $key);
+        }, 'RuntimeException');
+        mb_assert(strpos($error->getMessage(), '保存设置失败') === 0, 'message: ' . $error->getMessage());
+        mb_assert(strpos($error->getMessage(), $key) === false && strpos($error->getMessage(), 'mbk_') === false, 'key in message: ' . $error->getMessage());
+        mb_assert($error->getPrevious() === null, 'the original exception (with the SQL) must not be chained');
+    } finally {
+        MomoBird_Bootstrap::useStore(null);
+    }
+});

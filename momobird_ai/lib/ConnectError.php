@@ -3,6 +3,11 @@
  * Any failed call to the MomoBird connect API. The message and code are
  * redacted when the error is built, so no caller can forget to.
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 final class MomoBird_ConnectError extends RuntimeException
 {
     const NETWORK = 'NETWORK';

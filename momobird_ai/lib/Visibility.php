@@ -8,6 +8,11 @@
  * as "guests cannot read this". Each method returns null when the content may
  * be synced, otherwise a reason code.
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 final class MomoBird_Visibility
 {
     /** The id of Discuz!'s built-in guest user group. */

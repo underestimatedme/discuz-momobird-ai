@@ -23,6 +23,11 @@
  * and more than half of what MomoBird holds. Threads of forums taken out of the
  * plugin's forum selection go through the same guard.
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 final class MomoBird_SyncEngine
 {
     const SOURCE_KIND = 'discuz';
@@ -72,12 +77,15 @@ final class MomoBird_SyncEngine
 
     // ================================================================ entry points
 
-    /** For hooks: only marks the threads as waiting. No reads, no network. */
-    public function enqueue(array $tids, string $reason): void
+    /**
+     * For hooks: only marks the threads as waiting. No reads, no network.
+     * $existingOnly queues only threads the plugin already has a row for (ids from a request).
+     */
+    public function enqueue(array $tids, string $reason, bool $existingOnly = false): void
     {
         $ids = self::tids($tids);
         if ($ids) {
-            $this->store->enqueue($ids, $this->now(), false);
+            $this->store->enqueue($ids, $this->now(), $existingOnly);
         }
     }
 

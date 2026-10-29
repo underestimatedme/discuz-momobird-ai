@@ -9,6 +9,11 @@
  * Whenever the markup is ambiguous (unclosed tags, nesting) the converter
  * drops more rather than less.
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 class MomoBird_ContentText
 {
     /** Tags that wrap hidden or duplicated content; nesting is tracked and an unclosed one swallows the rest. */

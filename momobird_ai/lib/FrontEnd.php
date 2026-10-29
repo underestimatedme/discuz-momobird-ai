@@ -10,6 +10,11 @@
  * failure prints nothing (or drops the category): a page must never break
  * because of the plugin.
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 final class MomoBird_FrontEnd
 {
     const PODCAST_URL = 'https://momobird.atlaspaces.com/widget/podcast.v1.js';

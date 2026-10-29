@@ -108,10 +108,10 @@ mb_test('manifest: hook classes expose exactly the hook methods', function () {
     mb_mf_load_classes();
     // Discuz! registers every public method by name (cache_setting.php), so nothing else may be public.
     $expected = array(
-        'plugin_momobird_ai' => array('deletepost', 'deletethread', 'global_footer', 'undeletethreads'),
-        'plugin_momobird_ai_forum' => array('modcp_momobird_ai_message', 'post_momobird_ai_message', 'topicadmin_momobird_ai_message', 'viewthread_postbottom_output'),
-        'mobileplugin_momobird_ai' => array('deletepost', 'deletethread', 'global_footer_mobile', 'undeletethreads'),
-        'mobileplugin_momobird_ai_forum' => array('modcp_momobird_ai_message', 'post_momobird_ai_message', 'topicadmin_momobird_ai_message', 'viewthread_postbottom_mobile_output'),
+        'plugin_momobird_ai' => array('deletepost', 'deletethread', 'global_footer', 'threadpubsave', 'undeletethreads'),
+        'plugin_momobird_ai_forum' => array('misc_momobird_ai_message', 'modcp_momobird_ai_message', 'post_momobird_ai_message', 'topicadmin_momobird_ai_message', 'viewthread_postbottom_output'),
+        'mobileplugin_momobird_ai' => array('deletepost', 'deletethread', 'global_footer_mobile', 'threadpubsave', 'undeletethreads'),
+        'mobileplugin_momobird_ai_forum' => array('misc_momobird_ai_message', 'modcp_momobird_ai_message', 'post_momobird_ai_message', 'topicadmin_momobird_ai_message', 'viewthread_postbottom_mobile_output'),
     );
     foreach ($expected as $class => $methods) {
         mb_assert(class_exists($class, false), $class . ' missing');
@@ -144,4 +144,20 @@ mb_test('manifest: install creates the tables the engine needs', function () {
         mb_assert(strpos($text, "if(!defined('IN_DISCUZ') || !defined('IN_ADMINCP'))") !== false, $file . ' runs only inside the admin panel');
     }
     mb_assert(strpos(file_get_contents(MB_MF_DIR . '/install.php'), "updatecache(array('plugin', 'setting'))") !== false, 'install rebuilds caches');
+});
+
+mb_test('manifest: no plugin file runs when requested directly', function () {
+    $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator(MB_MF_DIR, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
+    $dirs = array(MB_MF_DIR);
+    foreach ($iterator as $file) {
+        if ($file->isDir()) {
+            $dirs[] = $file->getPathname();
+        } elseif ($file->getExtension() === 'php') {
+            $text = file_get_contents($file->getPathname());
+            mb_assert(preg_match("/\\A<\\?php\\s(?:\\/\\*.*?\\*\\/\\s*|\\/\\*\\*.*?\\*\\/\\s*)*if\\s*\\(!defined\\('IN_DISCUZ'\\)/s", $text) === 1, $file->getPathname() . ' lacks the IN_DISCUZ guard before its code');
+        }
+    }
+    foreach ($dirs as $dir) {
+        mb_assert(is_file($dir . '/index.htm'), $dir . ' has no index.htm');
+    }
 });

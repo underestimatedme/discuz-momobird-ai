@@ -8,6 +8,11 @@
  * the adapter needs it to find the first post).
  * First-post rows: POST_COLUMNS plus dateline and, on X5, content.
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 interface MomoBird_ForumSource
 {
     /** $_G['setting'] values: Visibility::SETTING_KEYS. */

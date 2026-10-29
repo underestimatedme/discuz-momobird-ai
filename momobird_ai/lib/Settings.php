@@ -6,6 +6,11 @@
  * The connection key is write-only: toArray() leaves it out, keyPrefix() shows
  * 8 characters, and debug dumps hide it.
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 final class MomoBird_Settings
 {
     const DEFAULT_BASE_URL = 'https://api.valley.atlaspaces.com';

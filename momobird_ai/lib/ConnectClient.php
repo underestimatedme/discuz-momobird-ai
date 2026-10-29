@@ -6,6 +6,11 @@
  * Nothing is retried here (the sync engine retries hourly), redirects are
  * errors, and the transport is injected so tests need no network.
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 final class MomoBird_ConnectClient
 {
     const API_PREFIX = '/momobird/api/public/connect/v1';

@@ -2,6 +2,9 @@
 
 error_reporting(E_ALL);
 
+// Plugin files refuse to run outside Discuz! (direct HTTP requests); the tests stand in for it.
+define('IN_DISCUZ', true);
+
 $GLOBALS['mb_tests'] = array();
 
 function mb_test($name, $callback)

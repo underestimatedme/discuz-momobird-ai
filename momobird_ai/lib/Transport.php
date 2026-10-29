@@ -6,6 +6,11 @@
  * Implementations must never throw and must never follow redirects: a 3xx
  * comes back as a normal status and the client treats it as an error.
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 interface MomoBird_Transport
 {
     /**

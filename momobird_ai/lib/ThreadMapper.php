@@ -2,6 +2,11 @@
 /**
  * Maps a Discuz! thread and its first post to the connect API push payload.
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 final class MomoBird_ThreadMapper
 {
     /**

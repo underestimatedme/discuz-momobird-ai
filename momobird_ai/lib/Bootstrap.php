@@ -83,17 +83,32 @@ final class MomoBird_Bootstrap
     }
 
     /**
-     * Save settings (the admin page, Task 6). $key null keeps the stored key. The forum
-     * address is stored as entered; empty means "follow 站点 URL".
+     * Save settings (the admin page). $key null keeps the stored key. The forum address is
+     * stored as entered; empty means "follow 站点 URL". A failed write throws a RuntimeException
+     * whose message has the key removed and that does not chain the original (Discuz!'s
+     * DbException carries the SQL, key included, to the error page and the error log).
      */
     public static function saveSettings(array $values, ?string $key): void
     {
         $store = self::store();
-        $settings = MomoBird_Settings::fromArray($values, self::httpHosts());
-        $store->set(self::SETTINGS_KEY, $settings->toArray());
-        if ($key !== null) {
-            $store->set(self::SECRET_KEY, array('key' => $key));
+        try {
+            $settings = MomoBird_Settings::fromArray($values, self::httpHosts());
+            $store->set(self::SETTINGS_KEY, $settings->toArray());
+            if ($key !== null) {
+                $store->set(self::SECRET_KEY, array('key' => $key));
+            }
+        } catch (Throwable $e) {
+            throw new RuntimeException('保存设置失败：' . MomoBird_Redactor::clean($e->getMessage(), (string) $key));
+        } finally {
+            self::$settings = null;
+            self::$frontEnd = null;
         }
+    }
+
+    /** @internal tests: replace the store (null restores the Discuz! one). */
+    public static function useStore(?MomoBird_Store $store): void
+    {
+        self::$store = $store;
         self::$settings = null;
         self::$frontEnd = null;
     }
@@ -118,31 +133,84 @@ final class MomoBird_Bootstrap
     }
 
     /**
-     * For hooks: queue the threads (one write, no network) and, on PHP-FPM, process the queue
-     * after the response has been sent. Elsewhere the 5-minute cron job does it.
+     * Function and message hooks: work out the threads (MomoBird_Hooks), queue them (one write,
+     * no network) and, on PHP-FPM, process the queue after the response has been sent. Elsewhere
+     * the 5-minute cron job does it. Nothing here may reach the page: errors are swallowed and
+     * the daily scan finds what was missed.
+     *
+     * @param string $event deletethread|deletepost|undeletethreads|threadpubsave|post|misc
+     * @param mixed  $param the hook's parameter
      */
-    public static function enqueue(array $tids, string $reason): void
+    public static function hook(string $event, $param): void
     {
-        if (!$tids || !self::supported()) {
+        if (!self::supported()) {
             return;
         }
         try {
-            self::engine()->enqueue($tids, $reason);
-            if (!self::settings()->validate()) {
-                self::afterResponse('drain');
+            $param = is_array($param) ? $param : array();
+            switch ($event) {
+                case 'deletethread':
+                    $tids = MomoBird_Hooks::deleteThreadTids($param);
+                    break;
+                case 'deletepost':
+                    $tids = MomoBird_Hooks::deletePostTids($param);
+                    break;
+                case 'undeletethreads':
+                    $tids = MomoBird_Hooks::undeleteTids($param);
+                    break;
+                case 'threadpubsave':
+                    $tids = MomoBird_Hooks::publishTids($param);
+                    break;
+                case 'post':
+                    $tids = MomoBird_Hooks::messageTids($param);
+                    break;
+                case 'misc':
+                    $tids = MomoBird_Hooks::miscTids($param);
+                    break;
+                default:
+                    $tids = array();
+            }
+            if ($tids) {
+                self::engine()->enqueue($tids, $event);
+                self::scheduleDrain();
             }
         } catch (Throwable $e) {
-            // Posting must never fail because of the plugin; the scan finds what was missed.
+            // Posting must never fail because of the plugin.
         }
     }
 
-    /** topicadmin / modcp message hooks: the moderated threads (MomoBird_Hooks::moderationTids). */
-    public static function moderation(string $module): void
+    /**
+     * topicadmin / modcp message hooks: only a logged-in moderator's successful action, and ids
+     * from the request never create rows for threads that do not exist.
+     */
+    public static function moderation(string $module, $param): void
     {
         global $_G;
-        $get = isset($_GET) && is_array($_GET) ? $_GET : array();
-        $tid = isset($_G['tid']) && is_numeric($_G['tid']) ? (int) $_G['tid'] : 0;
-        self::enqueue(MomoBird_Hooks::moderationTids($module, $get, $tid), $module);
+        if (!self::supported()) {
+            return;
+        }
+        try {
+            $uid = isset($_G['uid']) ? (int) $_G['uid'] : 0;
+            $adminid = isset($_G['adminid']) ? (int) $_G['adminid'] : 0;
+            $forumModerator = !empty($_G['forum']['ismoderator']);
+            $moderator = $uid > 0 && ($adminid > 0 || $forumModerator);
+            $get = isset($_GET) && is_array($_GET) ? $_GET : array();
+            $tid = isset($_G['tid']) && is_numeric($_G['tid']) ? (int) $_G['tid'] : 0;
+            $tids = MomoBird_Hooks::moderationTids($module, is_array($param) ? $param : array(), $get, $tid, $moderator);
+            if ($tids) {
+                MomoBird_Hooks::enqueueRequested(self::engine(), self::source(), $tids, $module);
+                self::scheduleDrain();
+            }
+        } catch (Throwable $e) {
+            // Moderation must never fail because of the plugin.
+        }
+    }
+
+    private static function scheduleDrain(): void
+    {
+        if (!self::settings()->validate()) {
+            self::afterResponse('drain');
+        }
     }
 
     /** global_footer / global_footer_mobile. */

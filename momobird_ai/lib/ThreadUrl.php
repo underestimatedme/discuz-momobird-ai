@@ -2,6 +2,11 @@
 /**
  * Absolute address of a thread, the way Discuz! prints it in rel=canonical.
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 final class MomoBird_ThreadUrl
 {
     /**

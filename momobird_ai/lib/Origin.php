@@ -2,6 +2,11 @@
 /**
  * Same-origin check between the forum address and the MomoBird source address.
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 final class MomoBird_Origin
 {
     /**

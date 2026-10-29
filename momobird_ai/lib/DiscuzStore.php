@@ -13,6 +13,11 @@
  * the primary key, an expired one with a compare-and-swap UPDATE, and released
  * only by its owner.
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 final class MomoBird_DiscuzStore implements MomoBird_Store
 {
     const POST = 'momobird_ai_post';

@@ -4,6 +4,11 @@
  * the real table prefix, splits on ";\n" and appends the site's charset to every
  * CREATE TABLE. Columns are documented on MomoBird_Store.
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 final class MomoBird_Schema
 {
     const POST_TABLE = 'momobird_ai_post';

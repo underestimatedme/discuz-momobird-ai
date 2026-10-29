@@ -6,6 +6,11 @@
  * full sync; see MomoBird_SyncEngine::refreshStatusCache / maybeEnableWidget).
  * Nothing here makes a network request.
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 final class MomoBird_WidgetState
 {
     const LOADER_URL = 'https://momobird.atlaspaces.com/widget/loader.v1.js';

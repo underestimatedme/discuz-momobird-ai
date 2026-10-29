@@ -36,25 +36,80 @@ mb_test('hooks: restored threads are enqueued', function () {
     mb_assert_same(array(), MomoBird_Hooks::undeleteTids(array('param' => array())), 'nothing');
 });
 
+/** moderationTids for a moderator after a success message. */
+function mb_hk_mod(string $module, array $get, int $tid = 0, string $message = ''): array
+{
+    if ($message === '') {
+        $message = $module === 'modcp' ? 'modcp_mod_succeed' : 'admin_succeed';
+    }
+    return MomoBird_Hooks::moderationTids($module, array('param' => array($message, '', array())), $get, $tid, true);
+}
+
 mb_test('hooks: front-end moderation enqueues the moderated threads', function () {
     $move = array('action' => 'moderate', 'moderate' => array('2', '3'), 'operations' => array('move'), 'moveto' => '4');
-    mb_assert_same(array(2, 3), MomoBird_Hooks::moderationTids('topicadmin', $move, 0), 'topicadmin move');
-    mb_assert_same(array(6), MomoBird_Hooks::moderationTids('topicadmin', array('action' => 'banpost', 'topiclist' => array('60')), 6), 'banpost: current thread');
-    mb_assert_same(array(2, 3, 6), MomoBird_Hooks::moderationTids('topicadmin', $move + array('tid' => 6), 6), 'moderate plus current thread');
+    mb_assert_same(array(2, 3), mb_hk_mod('topicadmin', $move), 'topicadmin move');
+    mb_assert_same(array(6), mb_hk_mod('topicadmin', array('action' => 'banpost', 'topiclist' => array('60')), 6), 'banpost: current thread');
+    mb_assert_same(array(2, 3, 6), mb_hk_mod('topicadmin', $move + array('tid' => 6), 6), 'moderate plus current thread');
+    mb_assert_same(array(6), mb_hk_mod('topicadmin', array('action' => 'repair'), 6, 'admin_repair_succeed'), 'repair');
 
-    mb_assert_same(array(7, 8), MomoBird_Hooks::moderationTids('modcp', array('action' => 'moderate', 'op' => 'threads', 'moderate' => array('7', '8'), 'modact' => 'validate'), 0), 'modcp threads');
-    mb_assert_same(array(7), MomoBird_Hooks::moderationTids('modcp', array('action' => 'moderate', 'moderate' => array('7')), 0), 'modcp default op');
-    mb_assert_same(array(), MomoBird_Hooks::moderationTids('modcp', array('action' => 'moderate', 'op' => 'replies', 'moderate' => array('70')), 0), 'modcp replies are post ids');
-    mb_assert_same(array(), MomoBird_Hooks::moderationTids('modcp', array('action' => 'moderate', 'op' => 'members', 'moderate' => array('5')), 0), 'modcp members are user ids');
-    mb_assert_same(array(9), MomoBird_Hooks::moderationTids('modcp', array('action' => 'recyclebin', 'moderate' => array('9')), 0), 'modcp recycle bin');
-    mb_assert_same(array(), MomoBird_Hooks::moderationTids('modcp', array('action' => 'member', 'moderate' => array('9')), 0), 'other modcp pages');
-    mb_assert_same(array(), MomoBird_Hooks::moderationTids('topicadmin', array('moderate' => 'x'), 0), 'not a list');
+    mb_assert_same(array(7, 8), mb_hk_mod('modcp', array('action' => 'moderate', 'op' => 'threads', 'moderate' => array('7', '8'), 'modact' => 'validate')), 'modcp threads');
+    mb_assert_same(array(7), mb_hk_mod('modcp', array('action' => 'moderate', 'moderate' => array('7'))), 'modcp default op');
+    mb_assert_same(array(), mb_hk_mod('modcp', array('action' => 'moderate', 'op' => 'replies', 'moderate' => array('70'))), 'modcp replies are post ids');
+    mb_assert_same(array(), mb_hk_mod('modcp', array('action' => 'moderate', 'op' => 'members', 'moderate' => array('5'))), 'modcp members are user ids');
+    mb_assert_same(array(9), mb_hk_mod('modcp', array('action' => 'recyclebin', 'op' => 'restore', 'moderate' => array('9')), 0, 'modcp_recyclebin_restore_succeed'), 'modcp recycle bin restore');
+    mb_assert_same(array(9), mb_hk_mod('modcp', array('action' => 'recyclebin', 'op' => 'delete', 'moderate' => array('9')), 0, 'modcp_recyclebin_delete_succeed'), 'modcp recycle bin delete');
+    mb_assert_same(array(), mb_hk_mod('modcp', array('action' => 'member', 'moderate' => array('9'))), 'other modcp pages');
+    mb_assert_same(array(), mb_hk_mod('topicadmin', array('moderate' => 'x')), 'not a list');
 });
 
-mb_test('hooks: tids are positive, unique and capped', function () {
+mb_test('hooks: moderation enqueues nothing after an error message or for a non-moderator', function () {
+    $get = array('action' => 'moderate', 'moderate' => array('4294967295', '4294967294'), 'operations' => array('close'));
+    foreach (array('admin_nopermission', 'thread_nonexistence', 'undefined_action', 'admin_move_have_mod', 'no_privilege_closethread', '') as $id) {
+        mb_assert_same(array(), MomoBird_Hooks::moderationTids('topicadmin', array('param' => array($id, '', array())), $get, 5, true), 'topicadmin ' . $id);
+    }
+    foreach (array('modcp_noaction', 'modcp_moduser_invalid', 'forum_status_off', 'modcp_logout_succeed', 'admin_succeed') as $id) {
+        mb_assert_same(array(), MomoBird_Hooks::moderationTids('modcp', array('param' => array($id, '', array())), $get, 0, true), 'modcp ' . $id);
+    }
+    mb_assert_same(array(), MomoBird_Hooks::moderationTids('modcp', array('param' => array('admin_succeed', '', array())), $get, 0, true), 'topicadmin id on modcp');
+    mb_assert_same(array(), MomoBird_Hooks::moderationTids('topicadmin', array('param' => array('admin_succeed', '', array())), $get, 5, false), 'not a moderator');
+    mb_assert_same(array(), MomoBird_Hooks::moderationTids('topicadmin', array(), $get, 5, true), 'no message');
+});
+
+mb_test('hooks: only ids taken from the request are capped', function () {
     $many = range(1, 2000);
-    $tids = MomoBird_Hooks::moderationTids('topicadmin', array('moderate' => array_merge(array('-1', '0', 'abc', '1e3', ' 12 '), $many, $many)), 0);
-    mb_assert_same(MomoBird_Hooks::MAX_TIDS, count($tids), 'capped');
+    $tids = mb_hk_mod('topicadmin', array('moderate' => array_merge(array('-1', '0', 'abc', '1e3', ' 12 ', '99999999999'), $many, $many)));
+    mb_assert_same(MomoBird_Hooks::MAX_REQUEST_TIDS, count($tids), 'request ids capped');
     mb_assert(!in_array(0, $tids, true) && !in_array(-1, $tids, true), 'no zero or negative ids');
     mb_assert_same(count($tids), count(array_unique($tids)), 'unique');
+
+    mb_assert_same(2000, count(MomoBird_Hooks::deleteThreadTids(array('step' => 'delete', 'param' => array($many, true, true, true)))), 'deletethread keeps every tid');
+    mb_assert_same(2000, count(MomoBird_Hooks::deletePostTids(array('step' => 'delete', 'param' => array($many, 'tid', true)))), 'deletepost keeps every tid');
+    mb_assert_same(2000, count(MomoBird_Hooks::undeleteTids(array('param' => array($many)))), 'undeletethreads keeps every tid');
+});
+
+mb_test('hooks: draft publishing and appended text enqueue the thread', function () {
+    mb_assert_same(array(31), MomoBird_Hooks::publishTids(array('step' => 'save', 'param' => array(31, false))), 'threadpubsave save step');
+    mb_assert_same(array(), MomoBird_Hooks::publishTids(array('step' => 'check', 'param' => array(31, false))), 'threadpubsave check step');
+    mb_assert_same(array(32), MomoBird_Hooks::miscTids(mb_hk_message('postappend_add_succeed', array('tid' => 32, 'pid' => 320))), 'postappend');
+    mb_assert_same(array(), MomoBird_Hooks::miscTids(mb_hk_message('postappend_only_yourself', array('tid' => 32))), 'postappend refused');
+});
+
+mb_test('hooks: request ids that are not threads never create queue rows', function () {
+    require_once __DIR__ . '/FakeStore.php';
+    require_once __DIR__ . '/FakeForumSource.php';
+    require_once __DIR__ . '/FakeTransport.php';
+    $store = new MomoBird_FakeStore();
+    $forum = new MomoBird_FakeForumSource();
+    $forum->addGroup(1, 'G')->addForum(2, 'F')->addThread(10, 2);
+    $store->savePost(array('tid' => 11, 'state' => 'synced', 'remote' => 1));
+    $settings = MomoBird_Settings::fromArray(array('key' => 'mbk_DISCUZLOCALTESTKEYDISCUZLOCALTESTKEYDISC', 'forumUrl' => 'https://bbs.example.com/'));
+    $engine = new MomoBird_SyncEngine($settings, new MomoBird_ConnectClient($settings, new MomoBird_FakeTransport()), $store, $forum, function () {
+        return 1800000000;
+    });
+
+    MomoBird_Hooks::enqueueRequested($engine, $forum, array(10, 11, 4294967295), 'topicadmin');
+    $rows = array_keys($store->rows);
+    sort($rows);
+    mb_assert_same(array(10, 11), $rows, 'no row for the made-up id');
+    mb_assert(isset($store->rows[10]['queued_at']) && isset($store->rows[11]['queued_at']), 'existing thread and known row are queued');
 });

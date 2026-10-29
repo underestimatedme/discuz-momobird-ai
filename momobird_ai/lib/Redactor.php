@@ -3,6 +3,11 @@
  * Removes the connection key (and anything shaped like one) from text that is
  * logged, stored, or shown to a user.
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 final class MomoBird_Redactor
 {
     const PLACEHOLDER = '[已隐藏的密钥]';

@@ -5,6 +5,11 @@
  * aborts the run without changing anything: a bad read must never look like
  * "everything was deleted".
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 final class MomoBird_ForumReadError extends RuntimeException
 {
 }

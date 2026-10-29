@@ -16,6 +16,11 @@
  * forum_viewthread.php builds them. A missing member gives NULLs, which
  * MomoBird_Visibility treats as "hidden".
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 final class MomoBird_DiscuzForumSource implements MomoBird_ForumSource
 {
     const GUEST_GROUP = 7;

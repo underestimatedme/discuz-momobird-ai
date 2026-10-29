@@ -10,6 +10,11 @@
  *
  * Only runs inside Discuz!; kept thin on purpose (unit tests use a stub).
  */
+
+if (!defined('IN_DISCUZ')) {
+    exit('Access Denied');
+}
+
 final class MomoBird_FilesockTransport implements MomoBird_Transport
 {
     const USER_AGENT = 'MomoBirdDiscuz/0.1.0';
