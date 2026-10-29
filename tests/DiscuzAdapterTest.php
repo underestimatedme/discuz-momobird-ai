@@ -104,3 +104,19 @@ mb_test('discuz adapter: runs get room for the engine budget plus one request', 
         MomoBird_Bootstrap::useStore(null);
     }
 });
+
+mb_test('discuz adapter: the cron job always runs after the page, with 5 s without PHP-FPM', function () {
+    mb_assert(!function_exists('fastcgi_finish_request'), 'the CLI test has no PHP-FPM');
+    if (!defined('CHARSET')) {
+        define('CHARSET', 'utf-8'); // what Discuz! defines on a UTF-8 site
+    }
+    MomoBird_Bootstrap::cancelPending();
+    MomoBird_Bootstrap::cron();
+    try {
+        mb_assert_same('cron', MomoBird_Bootstrap::pending(), 'the tick waits for the shutdown function');
+        mb_assert_same(5, MomoBird_Bootstrap::runBudget(false), 'mod_php budget');
+        mb_assert_same(20, MomoBird_Bootstrap::runBudget(true), 'PHP-FPM budget (after the response)');
+    } finally {
+        MomoBird_Bootstrap::cancelPending();
+    }
+});

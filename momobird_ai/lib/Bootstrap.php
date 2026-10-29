@@ -33,8 +33,14 @@ final class MomoBird_Bootstrap
 {
     const SETTINGS_KEY = MomoBird_Settings::KV_SETTINGS;
     const SECRET_KEY = MomoBird_Settings::KV_SECRET;
-    /** Seconds a request may spend syncing after its response (hook drain, cron tick). */
+    /** Seconds a request may spend syncing after its response (hook drain, cron tick) on PHP-FPM. */
     const RUN_SECONDS = 20;
+    /**
+     * Without PHP-FPM the cron tick still runs in the visitor's request (shutdown functions run
+     * before PHP finishes the response), so it gets a short budget; the daily scan just takes
+     * more ticks.
+     */
+    const INLINE_SECONDS = 5;
 
     private static $store;
     private static $source;
@@ -238,26 +244,44 @@ final class MomoBird_Bootstrap
         }
     }
 
-    /** The plugin cron job: run the tick after the response when possible, else now. */
+    /**
+     * The plugin cron job: the tick runs in a shutdown function, after the page. On PHP-FPM the
+     * response is finished first; elsewhere it runs with INLINE_SECONDS.
+     */
     public static function cron(): void
     {
         if (!self::supported()) {
             return;
         }
-        if (function_exists('fastcgi_finish_request')) {
-            self::afterResponse('cron');
-            return;
-        }
-        self::run('cron');
+        self::afterResponse('cron', true);
+    }
+
+    /** Seconds of engine work for one run after the page. */
+    public static function runBudget(bool $fpm): int
+    {
+        return $fpm ? self::RUN_SECONDS : self::INLINE_SECONDS;
+    }
+
+    /** @internal tests: the run waiting for the shutdown function ('drain', 'cron' or null). */
+    public static function pending(): ?string
+    {
+        return self::$pending;
+    }
+
+    /** @internal tests: drop the pending run (the shutdown function then does nothing). */
+    public static function cancelPending(): void
+    {
+        self::$pending = null;
     }
 
     /**
-     * One run after the response. A cron tick drains the queue too, so it replaces a pending
-     * drain; at most one run per request.
+     * One run after the page. A cron tick drains the queue too, so it replaces a pending
+     * drain; at most one run per request. A hook drain needs PHP-FPM ($always false); without
+     * it the cron job processes the queue.
      */
-    private static function afterResponse(string $kind): void
+    private static function afterResponse(string $kind, bool $always = false): void
     {
-        if (!function_exists('fastcgi_finish_request')) {
+        if (!$always && !function_exists('fastcgi_finish_request')) {
             return;
         }
         if (self::$pending === null) {
@@ -276,18 +300,24 @@ final class MomoBird_Bootstrap
         if ($kind === null) {
             return;
         }
-        if (function_exists('fastcgi_finish_request')) {
+        $fpm = function_exists('fastcgi_finish_request');
+        if ($fpm) {
             fastcgi_finish_request();
+        } else {
+            // Send the page now; the browser still waits for the end of the request.
+            while (ob_get_level() > 0 && @ob_end_flush()) {
+            }
+            @flush();
         }
-        self::run($kind);
+        self::run($kind, self::runBudget($fpm));
     }
 
-    private static function run(string $kind): void
+    private static function run(string $kind, int $seconds): void
     {
         self::allowRun();
         try {
             $engine = self::engine();
-            $deadline = time() + self::RUN_SECONDS;
+            $deadline = time() + $seconds;
             if ($kind === 'cron') {
                 $engine->cronTick($deadline);
             } else {
