@@ -31,6 +31,7 @@ final class MomoBird_Schema
             . "  updated_at INT UNSIGNED NOT NULL DEFAULT 0,\n"
             . "  queued_at INT UNSIGNED NULL DEFAULT NULL,\n"
             . "  priority TINYINT NOT NULL DEFAULT 0,\n"
+            . "  listed TINYINT NOT NULL DEFAULT 0,\n"
             . "  PRIMARY KEY (tid),\n"
             . "  KEY priority_queued (priority, queued_at),\n"
             . "  KEY state (state)\n"

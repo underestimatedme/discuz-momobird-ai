@@ -14,7 +14,7 @@ class MomoBird_FakeStore implements MomoBird_Store
 
     const COLUMNS = array(
         'tid' => 0, 'state' => 'pending', 'content_hash' => '', 'body_hash' => '', 'category' => '', 'title' => '',
-        'attempts' => 0, 'last_error' => '', 'remote' => 0, 'content_changed_at' => 0, 'updated_at' => 0, 'queued_at' => null, 'priority' => 0,
+        'attempts' => 0, 'last_error' => '', 'remote' => 0, 'content_changed_at' => 0, 'updated_at' => 0, 'queued_at' => null, 'priority' => 0, 'listed' => 0,
     );
 
     public function posts(array $tids): array
@@ -39,6 +39,7 @@ class MomoBird_FakeStore implements MomoBird_Store
         $clean['tid'] = $tid;
         $clean['queued_at'] = $queued;
         $clean['priority'] = isset($this->rows[$tid]) ? $this->rows[$tid]['priority'] : 0;
+        $clean['listed'] = isset($this->rows[$tid]) ? $this->rows[$tid]['listed'] : 0;
         $this->rows[$tid] = $clean;
     }
 
@@ -137,10 +138,74 @@ class MomoBird_FakeStore implements MomoBird_Store
             $tid = (int) $tid;
             if (isset($this->rows[$tid])) {
                 $this->rows[$tid]['remote'] = 1;
+                $this->rows[$tid]['listed'] = 1;
             } else {
-                $this->rows[$tid] = array('tid' => $tid, 'state' => 'orphan', 'remote' => 1, 'updated_at' => $now) + self::COLUMNS;
+                $this->rows[$tid] = array('tid' => $tid, 'state' => 'orphan', 'remote' => 1, 'listed' => 1, 'updated_at' => $now) + self::COLUMNS;
             }
         }
+    }
+
+    public function clearListed(): void
+    {
+        foreach ($this->rows as $tid => $row) {
+            $this->rows[$tid]['listed'] = 0;
+        }
+    }
+
+    public function requeueUnlisted(int $since, int $now): int
+    {
+        $n = 0;
+        foreach ($this->rows as $tid => $row) {
+            if ($row['state'] === 'synced' && (int) $row['listed'] === 0 && $row['updated_at'] <= $since) {
+                $this->rows[$tid]['content_hash'] = '';
+                if ($row['queued_at'] === null) {
+                    $this->rows[$tid]['queued_at'] = $now;
+                }
+                $n++;
+            }
+        }
+        return $n;
+    }
+
+    public function rowsBetween(int $low, int $high, int $limit): array
+    {
+        $out = array();
+        foreach ($this->rows as $tid => $row) {
+            if ($tid >= $low && $tid <= $high && !in_array($row['state'], array('gone', 'orphan'), true)) {
+                $out[$tid] = (int) $row['remote'];
+            }
+        }
+        krsort($out);
+        return array_slice($out, 0, $limit, true);
+    }
+
+    public function markGone(array $tids, int $now): void
+    {
+        foreach ($tids as $tid) {
+            $tid = (int) $tid;
+            if (!isset($this->rows[$tid])) {
+                $this->rows[$tid] = array('tid' => $tid) + self::COLUMNS;
+            }
+            $this->rows[$tid]['state'] = 'gone';
+            $this->rows[$tid]['remote'] = 1;
+            $this->rows[$tid]['updated_at'] = $now;
+        }
+    }
+
+    public function resetSync(int $now): int
+    {
+        $n = 0;
+        foreach ($this->rows as $tid => $row) {
+            if (in_array($row['state'], array('orphan', 'gone'), true) && $row['queued_at'] === null) {
+                unset($this->rows[$tid]);
+                continue;
+            }
+            $this->rows[$tid] = array_merge($row, array('state' => 'pending', 'content_hash' => '', 'body_hash' => '', 'remote' => 0,
+                'attempts' => 0, 'last_error' => '', 'listed' => 0, 'updated_at' => $now,
+                'queued_at' => $row['queued_at'] === null ? $now : $row['queued_at']));
+            $n++;
+        }
+        return $n;
     }
 
     public function clearOrphans(): void

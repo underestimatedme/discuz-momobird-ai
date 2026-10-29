@@ -1098,3 +1098,154 @@ mb_test('a failed read keeps the priority of requeued threads', function () {
     $w->engine->drain(mb_se_deadline($w));
     mb_assert_same(array(11, 12), $w->store->queued(10), 'priority thread still first');
 });
+
+// ---------------------------------------------------------------- final review fix wave
+
+/** One full daily round of cron ticks (scan, reconcile, settle). */
+function mb_se_round(stdClass $w, int $ticks = 5): void
+{
+    $w->clock->now += MomoBird_SyncEngine::ROUND_INTERVAL;
+    for ($i = 0; $i < $ticks; $i++) {
+        $w->engine->cronTick(mb_se_deadline($w));
+        $w->clock->now += 300;
+    }
+}
+
+function mb_se_vanish(stdClass $w, array $tids): void
+{
+    foreach ($tids as $tid) {
+        unset($w->forum->threads[$tid], $w->forum->posts[$tid]);
+    }
+}
+
+mb_test('I-1 scan withdraws synced threads that vanished without a hook', function () {
+    $w = mb_se();
+    mb_se_threads($w, array(11, 12, 13), 2);
+    mb_se_full($w);
+    mb_se_reset_requests($w);
+    // A merge or a direct database delete: no hook fires.
+    mb_se_vanish($w, array(12, 11));
+    mb_se_round($w);
+    $deleted = $w->server->deletedIds();
+    sort($deleted);
+    mb_assert_same(array('11', '12'), $deleted, 'vanished threads withdrawn, the lowest tid included');
+    mb_assert_same(null, $w->store->state(12), 'row gone');
+    mb_assert_same('synced', $w->store->state(13), 'the rest untouched');
+    mb_assert(isset($w->server->posts['13']) && !isset($w->server->posts['12']), 'MomoBird state');
+});
+
+mb_test('I-1 many vanished threads are held as a possible read failure until confirmed', function () {
+    $w = mb_se();
+    mb_se_threads($w, range(1, 30), 2);
+    mb_se_full($w);
+    mb_se_reset_requests($w);
+    mb_se_vanish($w, range(1, 20));
+    mb_se_round($w);
+    mb_assert_same(array(), $w->server->deletedIds(), 'nothing withdrawn while held');
+    $guard = $w->engine->status()['guard'];
+    mb_assert(is_array($guard) && ($guard['reason'] ?? '') === 'missing' && (int) $guard['would_remove'] === 20, 'held with reason missing: ' . json_encode($guard));
+    $w->engine->confirmWithdraw();
+    mb_assert_same(20, count($w->server->deletedIds()), 'withdrawn once confirmed');
+    mb_assert_same(null, $w->engine->status()['guard'], 'guard cleared');
+});
+
+mb_test('I-1 the reconcile after a full sync withdraws listed threads that no longer exist', function () {
+    $w = mb_se();
+    mb_se_threads($w, array(11, 12, 13), 2);
+    mb_se_full($w);
+    mb_se_reset_requests($w);
+    mb_se_vanish($w, array(12));
+    mb_se_full($w);
+    mb_assert_same(array('12'), $w->server->deletedIds(), 'withdrawn by the full sync reconcile');
+    mb_assert_same(null, $w->store->state(12), 'row gone');
+});
+
+mb_test('I-2 a new connect source id resets sync state and pushes everything again', function () {
+    $w = mb_se();
+    mb_se_threads($w, array(11, 12), 2);
+    mb_se_full($w);
+    $w->clock->now += 3700;
+    $w->engine->cronTick(mb_se_deadline($w));
+    mb_se_reset_requests($w);
+    $w->clock->now += 3700;
+    $w->engine->cronTick(mb_se_deadline($w));
+    mb_assert_same(array(), $w->server->pushedIds(), 'the first stored source id is a baseline, not a change');
+
+    // The owner switched to a new source's key: it holds nothing.
+    $w->server->posts = array();
+    $w->server->sourceId = 'src-2';
+    $w->clock->now += 3700;
+    $w->engine->cronTick(mb_se_deadline($w));
+    $pushed = $w->server->pushedIds();
+    sort($pushed);
+    mb_assert_same(array('11', '12'), $pushed, 'everything pushed to the new source');
+    mb_assert_same(array(), $w->server->deletedIds(), 'nothing withdrawn from the new source');
+});
+
+mb_test('I-2 the end of a full sync re-pushes synced threads MomoBird does not list', function () {
+    $w = mb_se();
+    mb_se_threads($w, array(11, 12), 2);
+    mb_se_full($w);
+    unset($w->server->posts['12']);
+    mb_se_reset_requests($w);
+    mb_se_full($w);
+    mb_se_sync($w, array());
+    $w->engine->cronTick(mb_se_deadline($w));
+    mb_assert(in_array('12', $w->server->pushedIds(), true), 'missing thread pushed again: ' . json_encode($w->server->routes()));
+    mb_assert(!in_array('11', $w->server->pushedIds(), true), 'listed thread not pushed');
+    mb_assert(isset($w->server->posts['12']), 'MomoBird holds it again');
+});
+
+mb_test('I-2 the end-of-round reconcile re-pushes synced threads MomoBird does not list', function () {
+    $w = mb_se();
+    mb_se_threads($w, array(11, 12), 2);
+    mb_se_full($w);
+    unset($w->server->posts['11']);
+    mb_se_reset_requests($w);
+    mb_se_round($w);
+    mb_assert_same(array('11'), $w->server->pushedIds(), 'only the unlisted thread pushed again');
+});
+
+mb_test('I-3 a failed status refresh waits 15 minutes and is not repeated within a tick', function () {
+    $w = mb_se();
+    mb_se_threads($w, array(11), 2);
+    mb_se_full($w);
+    $w->forum->posts[11]['message'] = '改过的正文';
+    $w->engine->enqueue(array(11), 'test');
+    mb_se_reset_requests($w);
+    $w->server->fail('GET /status', 0, '', 100);
+    $w->clock->now += 3700;
+    $w->engine->cronTick(mb_se_deadline($w));
+    mb_assert_same(1, $w->server->count('GET /status'), 'one status request per tick during an outage');
+    $w->clock->now += 300;
+    $w->engine->cronTick(mb_se_deadline($w));
+    mb_assert_same(1, $w->server->count('GET /status'), 'no retry within 15 minutes');
+    $w->clock->now += 600;
+    $w->engine->cronTick(mb_se_deadline($w));
+    mb_assert_same(2, $w->server->count('GET /status'), 'retried after 15 minutes');
+});
+
+mb_test('an empty forum field read is a read failure, not a withdrawal', function () {
+    $w = mb_se();
+    mb_se_threads($w, array(11, 12), 2);
+    mb_se_full($w);
+    mb_se_reset_requests($w);
+    $w->forum->fields = array();
+    $w->engine->enqueue(array(11, 12), 'test');
+    $w->engine->drain(mb_se_deadline($w));
+    mb_se_round($w);
+    mb_assert_same(array(), $w->server->writes(), 'nothing withdrawn or pushed');
+    mb_assert_same('synced', $w->store->state(11), 'state kept');
+    mb_assert($w->store->get('read_error') !== null, 'read error recorded');
+});
+
+mb_test('ids from another kind of source never count as vanished threads', function () {
+    $w = mb_se();
+    $w->server->kind = 'wordpress';
+    mb_se_threads($w, array(11));
+    $w->server->seed(array(5, 500));
+    mb_se_full($w);
+    mb_se_round($w);
+    mb_se_round($w);
+    mb_assert(isset($w->server->posts['5']) && isset($w->server->posts['500']), 'foreign posts kept: ' . json_encode($w->server->deletedIds()));
+});

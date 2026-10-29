@@ -5,7 +5,7 @@
  *
  * pre_momobird_ai_post (one row per thread the engine knows about, never the body):
  *   tid                 INT UNSIGNED PRIMARY KEY
- *   state               VARCHAR(16)  pending|synced|failed|rejected|held|orphan
+ *   state               VARCHAR(16)  pending|synced|failed|rejected|held|orphan|gone
  *   content_hash        CHAR(64)     hash of the last payload sent or attempted ('' = none)
  *   body_hash           CHAR(64)     title+text digest, for content_changed_at ('' = none)
  *   category            VARCHAR(255) category of the last payload ('' = none)
@@ -17,6 +17,7 @@
  *   updated_at          INT          last time the engine wrote the row
  *   queued_at           INT NULL     set while the thread waits to be processed
  *   priority            TINYINT      1 = queued by a forum settings change: processed first
+ *   listed              TINYINT      1 = in MomoBird's post list during the current reconcile
  *   KEY (priority, queued_at), KEY (state)
  *
  * pre_momobird_ai_kv:
@@ -30,6 +31,8 @@
  *   held      eligible but pushing is blocked (plan expired, address mismatch); requeued when it opens
  *   orphan    MomoBird holds it but the forum should not (MomoBird-only id, or a thread hidden
  *             only by the plugin's forum selection): waits for the cleanup guard
+ *   gone      MomoBird may hold it but the thread no longer exists (deleted without a hook):
+ *             withdrawn, or held behind the cleanup guard when many go at once
  *
  * Locks: lock()/unlock() give one engine run at a time (the adapter keeps them as kv rows; see MomoBird_DiscuzStore).
  */
@@ -80,10 +83,35 @@ interface MomoBird_Store
     public function dueRetries(int $failedBefore, int $maxAttempts, int $limit): array;
 
     /**
-     * MomoBird listed these tids: existing rows get remote=1, missing ones are inserted as
-     * state=orphan, remote=1.
+     * MomoBird listed these tids: existing rows get remote=1, listed=1, missing ones are
+     * inserted as state=orphan, remote=1, listed=1.
      */
     public function markRemote(array $tids, int $now): void;
+
+    /** A new reconcile listing starts: listed=0 on every row. */
+    public function clearListed(): void;
+
+    /**
+     * Rows of synced threads MomoBird did not list (listed=0) and the engine has not written
+     * since $since: content_hash='' and queued, so they are pushed again. Returns how many.
+     */
+    public function requeueUnlisted(int $since, int $now): int;
+
+    /**
+     * @return array<int, int> tid => remote, for rows with $low <= tid <= $high, highest first;
+     *         gone and orphan rows are left out (an orphan id may belong to another kind of source)
+     */
+    public function rowsBetween(int $low, int $high, int $limit): array;
+
+    /** These threads no longer exist: state=gone, remote=1 (rows are inserted when missing). */
+    public function markGone(array $tids, int $now): void;
+
+    /**
+     * The connected MomoBird source changed: orphan and gone rows are deleted (they belong to
+     * the old source), every other row becomes pending with no hash, remote=0, and is queued.
+     * Returns how many rows were queued.
+     */
+    public function resetSync(int $now): int;
 
     /** Delete orphan rows that are not queued (a new listing marks them again). */
     public function clearOrphans(): void;

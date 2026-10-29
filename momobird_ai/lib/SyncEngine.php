@@ -39,6 +39,10 @@ final class MomoBird_SyncEngine
     const RETRY_INTERVAL = 3600;
     const MAX_RETRIES = 5;
     const STATUS_TTL = 3600;
+    /** After a failed status refresh: no new attempt for this long (one timeout per tick at most). */
+    const STATUS_RETRY = 900;
+    /** The scan reads this many rows of plugin state per thread range when looking for vanished threads. */
+    const GONE_ROWS = 5000;
     const ROUND_INTERVAL = 86400;
     const GUARD_MIN_REMOVALS = 10;
     /** The scan stops adding work while this many threads already wait in the queue. */
@@ -171,6 +175,9 @@ final class MomoBird_SyncEngine
 
         $this->scanSegment($run, $ctx, $deadline);
         $this->drainQueue($run, $ctx, $deadline);
+        if ($this->store->get('reconcile') === null) {
+            $this->settleGone($run, $deadline, false);
+        }
         $this->reconcileStep($run, $deadline);
         if ($this->store->get('reconcile') === null) {
             $this->settleOrphans($run, $deadline, false, null, null);
@@ -289,7 +296,14 @@ final class MomoBird_SyncEngine
                 $guard = is_array($guard) ? $guard : array();
                 $guard['confirmed'] = true;
                 $this->store->set('guard', $guard);
-                $this->settleOrphans($run, $deadline, true, null, null);
+                $goneGuard = $this->store->get('gone_guard');
+                if (is_array($goneGuard)) {
+                    $goneGuard['confirmed'] = true;
+                    $this->store->set('gone_guard', $goneGuard);
+                }
+                if ($this->settleGone($run, $deadline, true)) {
+                    $this->settleOrphans($run, $deadline, true, null, null);
+                }
             }
         });
         if (!$locked) {
@@ -338,6 +352,9 @@ final class MomoBird_SyncEngine
         $scan = $this->store->get('scan') ?: array();
         $full = $this->store->get('full_sync') ?: array();
         $guard = $this->store->get('guard');
+        if (!is_array($guard) || empty($guard['held'])) {
+            $guard = $this->store->get('gone_guard');
+        }
         $halt = $this->store->get('halt');
         $plan = $this->store->get('plan');
         $reconcile = $this->store->get('last_reconcile');
@@ -570,6 +587,10 @@ final class MomoBird_SyncEngine
             throw new MomoBird_ForumReadError(self::READ_MESSAGE . '：没有读到任何版块');
         }
         $fields = (array) $this->src('forumFields');
+        if (!$fields) {
+            // Every forum has a forumfield row: none at all is a failed read, not hidden forums.
+            throw new MomoBird_ForumReadError(self::READ_MESSAGE . '：没有读到版块资料');
+        }
         $selected = $this->settings->forumIds();
         $reasons = array();
         $open = array();
@@ -822,7 +843,11 @@ final class MomoBird_SyncEngine
             return 'PLAN_REQUIRED';
         }
         $cached = $this->store->get('connect_status');
-        if ($this->statusDue() || empty($cached['ok'])) {
+        if (empty($cached['ok']) && !$this->statusDue()) {
+            // Failed recently: wait for STATUS_RETRY instead of another timeout in this run.
+            return 'UNAVAILABLE';
+        }
+        if ($this->statusDue()) {
             if (!$this->hasTime($deadline) || !$this->refreshStatusCache($run)) {
                 return 'UNAVAILABLE';
             }
@@ -1162,11 +1187,14 @@ final class MomoBird_SyncEngine
 
         if (!$confirmed) {
             $cached = $this->store->get('connect_status');
-            if (empty($cached['ok']) || $this->statusDue()) {
+            if ($this->statusDue()) {
                 if (!$this->hasTime($deadline) || !$this->refreshStatusCache($run)) {
                     return false;
                 }
                 $cached = $this->store->get('connect_status');
+            }
+            if (empty($cached['ok'])) {
+                return false;
             }
             $kind = $cached['source']['kind'] ?? null;
             $local = $local !== null ? $local : $this->store->countState('synced');
@@ -1220,12 +1248,133 @@ final class MomoBird_SyncEngine
         return true;
     }
 
-    // ================================================================ fingerprint
+    // ================================================================ vanished threads
 
     /**
-     * Compare what decides "may a guest read it, under which category" with the last
-     * tick, and queue the threads of every forum whose answer changed.
+     * Plugin rows in [$low, $high] whose thread is not among $seen were deleted without a hook
+     * (merge, direct database writes). Each is looked up once more; rows MomoBird may hold
+     * become `gone`, the others are dropped.
      */
+    private function findGone(MomoBird_SyncResult $run, int $low, int $high, array $seen): void
+    {
+        if ($high < $low) {
+            return;
+        }
+        $seen = array_flip($seen);
+        $candidates = array();
+        foreach ($this->store->rowsBetween($low, $high, self::GONE_ROWS) as $tid => $remote) {
+            if (!isset($seen[$tid])) {
+                $candidates[$tid] = $remote;
+            }
+        }
+        if (!$candidates) {
+            return;
+        }
+        $exists = (array) $this->src('threads', array(array_keys($candidates)));
+        $gone = array();
+        $local = array();
+        foreach ($candidates as $tid => $remote) {
+            if (isset($exists[$tid])) {
+                continue;
+            }
+            if ($remote === 1) {
+                $gone[] = $tid;
+            } else {
+                $local[] = $tid;
+            }
+        }
+        if ($local) {
+            $this->store->deletePosts($local);
+        }
+        if ($gone) {
+            $this->store->markGone($gone, $this->now());
+        }
+    }
+
+    /**
+     * Withdraw `gone` rows. More than GUARD_MIN_REMOVALS at once may be a failed read (an
+     * unreachable thread table), so they wait for 「确认撤下」 with a status message.
+     *
+     * @return bool true when settled (nothing left, or held), false when interrupted
+     */
+    private function settleGone(MomoBird_SyncResult $run, int $deadline, bool $confirmed): bool
+    {
+        $count = $this->store->countState('gone');
+        $guard = $this->store->get('gone_guard');
+        if ($count === 0) {
+            if ($guard !== null) {
+                $this->store->set('gone_guard', null);
+            }
+            return true;
+        }
+        $confirmed = $confirmed || !empty($guard['confirmed']);
+        if (!$confirmed && $count > self::GUARD_MIN_REMOVALS) {
+            $message = '清理保护：论坛里读不到 ' . $count . ' 篇已经同步过的主题，可能被删除了，也可能是读取论坛数据出错，已暂停撤下。'
+                . '确认这些主题确实已被删除，请在 MomoBird 页面点「确认撤下」';
+            $this->store->set('gone_guard', array(
+                'held' => true, 'reason' => 'missing', 'would_remove' => $count, 'message' => $message,
+                'at' => isset($guard['at']) ? (int) $guard['at'] : $this->now(), 'confirmed' => false,
+            ));
+            $run->guardHeld = true;
+            $run->note($message);
+            return true;
+        }
+        while (true) {
+            if ($this->stopped($run)) {
+                return false;
+            }
+            if (!$this->hasTime($deadline)) {
+                $run->deadlineReached = true;
+                return false;
+            }
+            $tids = $this->store->stateTids('gone', self::DELETE_BATCH);
+            if (!$tids) {
+                break;
+            }
+            $rows = $this->store->posts($tids);
+            $items = array();
+            foreach ($tids as $tid) {
+                $items[] = array('tid' => $tid, 'title' => isset($rows[$tid]) ? (string) $rows[$tid]['title'] : '', 'row' => $rows[$tid] ?? null);
+            }
+            if (!$this->sendWithdrawals($run, $items, $deadline, true)) {
+                return false;
+            }
+        }
+        $this->store->set('gone_guard', null);
+        return true;
+    }
+
+    // ================================================================ connected source
+
+    /**
+     * The first source id seen is the baseline. A different one (a new key, another project or
+     * space) holds none of what was pushed: every row is reset and queued, the reconcile and the
+     * guards start over, and the assistant may be published once more for the new project.
+     */
+    private function checkSource(MomoBird_SyncResult $run, ?array $source): void
+    {
+        $id = isset($source['id']) && is_scalar($source['id']) ? (string) $source['id'] : '';
+        if ($id === '') {
+            return;
+        }
+        $stored = $this->store->get('source');
+        if (!isset($stored['id'])) {
+            $this->store->set('source', array('id' => $id, 'at' => $this->now()));
+            return;
+        }
+        if ((string) $stored['id'] === $id) {
+            return;
+        }
+        $queued = $this->store->resetSync($this->now());
+        foreach (array('reconcile', 'guard', 'gone_guard', 'widget_enable', 'requeue') as $key) {
+            $this->store->set($key, null);
+        }
+        $this->store->set('source', array('id' => $id, 'at' => $this->now()));
+        $run->note('MomoBird 来源换了，已把论坛里的 ' . $queued . ' 篇主题全部重新排队推送');
+    }
+
+    // ================================================================ fingerprint
+
     /** What decides "may a guest read it, under which category", per forum and site-wide. */
     private function currentFingerprint(array $ctx): array
     {
@@ -1261,6 +1410,10 @@ final class MomoBird_SyncEngine
         }
     }
 
+    /**
+     * Compare what decides "may a guest read it, under which category" with the stored
+     * baseline, and queue the threads of every forum whose answer changed.
+     */
     private function fingerprint(MomoBird_SyncResult $run, array $ctx): void
     {
         $now = $this->currentFingerprint($ctx);
@@ -1358,6 +1511,12 @@ final class MomoBird_SyncEngine
             }
             $cursor = isset($scan['cursor']) ? (int) $scan['cursor'] : null;
             $rows = (array) $this->src('threadsBelow', array($cursor, self::READ_ROWS));
+            // This read covers every tid below the cursor down to its lowest tid (down to 1 when
+            // it is the last read): plugin rows in that range without a thread were deleted.
+            $tids = array_map('intval', array_column($rows, 'tid'));
+            $high = $cursor === null ? PHP_INT_MAX : $cursor - 1;
+            $low = count($rows) < self::READ_ROWS || !$tids ? 1 : min($tids);
+            $this->findGone($run, $low, $high, $tids);
             foreach (array_chunk($rows, self::SCAN_CHUNK) as $chunk) {
                 $scan['eligible'] = (int) $scan['eligible'] + $this->scanChunk($ctx, $chunk);
                 $scan['cursor'] = min(array_map('intval', array_column($chunk, 'tid')));
@@ -1439,8 +1598,10 @@ final class MomoBird_SyncEngine
             'round_finished_at' => $this->now(), 'eligible' => $eligible,
         ));
         $this->store->clearOrphans();
+        $this->store->clearListed();
         $this->store->set('guard', null);
-        $this->store->set('reconcile', array('phase' => 'listing', 'cursor' => null, 'pages' => 0, 'remote' => 0, 'local' => $eligible));
+        $this->store->set('reconcile', array('phase' => 'listing', 'cursor' => null, 'pages' => 0, 'remote' => 0, 'local' => $eligible,
+            'started_at' => $this->now()));
     }
 
     // ================================================================ reconcile
@@ -1480,7 +1641,27 @@ final class MomoBird_SyncEngine
                 }
             }
             if ($ids) {
+                // Listed threads the plugin pushed whose thread is gone: withdraw them (behind the
+                // guard when many). Ids the plugin never had stay orphans (the source may not be ours).
+                $known = array();
+                foreach ($this->store->posts($ids) as $tid => $row) {
+                    if ($row['state'] !== 'orphan') {
+                        $known[] = (int) $tid;
+                    }
+                }
                 $this->store->markRemote($ids, $this->now());
+                if ($known) {
+                    $exists = (array) $this->src('threads', array($known));
+                    $gone = array();
+                    foreach ($known as $tid) {
+                        if (!isset($exists[$tid])) {
+                            $gone[] = (int) $tid;
+                        }
+                    }
+                    if ($gone) {
+                        $this->store->markGone($gone, $this->now());
+                    }
+                }
             }
             $rec['remote'] = (int) $rec['remote'] + count($page['items']);
             $rec['pages'] = (int) $rec['pages'] + 1;
@@ -1502,6 +1683,18 @@ final class MomoBird_SyncEngine
             $this->store->set('reconcile', null);
             return;
         }
+        if (empty($rec['requeued'])) {
+            // MomoBird does not have these synced threads (deleted there, or a wiped source): push again.
+            $requeued = $this->store->requeueUnlisted((int) ($rec['started_at'] ?? $this->now()), $this->now());
+            if ($requeued > 0) {
+                $run->note('MomoBird 上缺少 ' . $requeued . ' 篇已同步的主题，已重新排队推送');
+            }
+            $rec['requeued'] = true;
+            $this->store->set('reconcile', $rec);
+        }
+        if (!$this->settleGone($run, $deadline, false)) {
+            return;
+        }
         $before = $run->removed;
         if ($this->settleOrphans($run, $deadline, false, (int) $rec['local'], (int) $rec['remote'])) {
             $this->store->set('reconcile', null);
@@ -1514,7 +1707,11 @@ final class MomoBird_SyncEngine
     private function statusDue(): bool
     {
         $cached = $this->store->get('connect_status');
-        return !isset($cached['checked_at']) || $this->now() - (int) $cached['checked_at'] >= self::STATUS_TTL;
+        if (!isset($cached['checked_at'])) {
+            return true;
+        }
+        $age = $this->now() - (int) $cached['checked_at'];
+        return $age >= (empty($cached['ok']) ? self::STATUS_RETRY : self::STATUS_TTL);
     }
 
     /**
@@ -1553,6 +1750,7 @@ final class MomoBird_SyncEngine
         }
         $this->store->set('connect_status', $entry);
         $this->store->set('halt', null);
+        $this->checkSource($run, $entry['source']);
         $active = $entry['entitlement']['active'] ?? null;
         if ($active === false) {
             $this->store->set('plan', array('at' => $this->now()));

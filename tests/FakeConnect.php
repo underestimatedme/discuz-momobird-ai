@@ -11,6 +11,7 @@ class MomoBird_FakeConnect
     /** @var array<string, array> external_id => last payload */
     public $posts = array();
     public $kind = 'discuz';
+    public $sourceId = 'src-1';
     public $siteUrl = 'https://bbs.example.com';
     public $entitlementActive = true;
     public $widget = array('public_id' => 'pub_test', 'available' => false, 'reason' => 'not_published');
@@ -131,7 +132,7 @@ class MomoBird_FakeConnect
             case 'GET /status':
                 return self::ok(array(
                     'project' => array('id' => 'p1', 'name' => '测试项目'),
-                    'source' => array('id' => 'src-1', 'kind' => $this->kind, 'name' => '论坛', 'site_url' => $this->siteUrl,
+                    'source' => array('id' => $this->sourceId, 'kind' => $this->kind, 'name' => '论坛', 'site_url' => $this->siteUrl,
                         'document_count' => count($this->posts), 'ready_document_count' => count($this->posts)),
                     'entitlement' => array('status' => $this->entitlementActive ? 'pro' : 'expired', 'active' => $this->entitlementActive),
                     'widget' => $this->widget,

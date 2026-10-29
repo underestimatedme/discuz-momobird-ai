@@ -626,6 +626,10 @@ final class MomoBird_AdminPage
     {
         $count = isset($guard['would_remove']) && is_numeric($guard['would_remove']) ? (int) $guard['would_remove'] : 0;
         $what = $count > 0 ? $count . ' 篇' : '一些';
+        if (($guard['reason'] ?? '') === 'missing') {
+            return '清理保护：论坛里读不到 ' . $what . '已经同步过的主题，可能被删除了（例如合并主题、直接改数据库），也可能是读取论坛数据出错，为防止误删，这次没有撤下。'
+                . '确认这些主题确实已被删除，就点「确认撤下」。';
+        }
         if (($guard['reason'] ?? '') === 'kind') {
             return '清理保护：MomoBird 上有 ' . $what . '主题在论坛里已经不该同步了，但这个来源的类型不是 discuz，所以没有自动撤下。'
                 . '确认它们都来自这个论坛后，点「确认撤下」。';

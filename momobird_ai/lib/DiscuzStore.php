@@ -25,7 +25,7 @@ final class MomoBird_DiscuzStore implements MomoBird_Store
     const CHUNK = 500;
     const LOCK_PREFIX = 'lock:';
 
-    const INT_COLUMNS = array('tid', 'attempts', 'remote', 'content_changed_at', 'updated_at', 'priority');
+    const INT_COLUMNS = array('tid', 'attempts', 'remote', 'content_changed_at', 'updated_at', 'priority', 'listed');
     const TEXT_COLUMNS = array('state' => 16, 'content_hash' => 64, 'body_hash' => 64, 'category' => 255, 'title' => 255, 'last_error' => 255);
 
     /** @var array<string, string> lock name => the kv value this process wrote */
@@ -66,7 +66,8 @@ final class MomoBird_DiscuzStore implements MomoBird_Store
                 $updates[] = $column . '=VALUES(' . $column . ')';
             }
         }
-        // queued_at and priority are never written here: a hook may have queued the thread meanwhile.
+        // queued_at, priority and listed are never written here: a hook may have queued the
+        // thread meanwhile, and listed belongs to the running reconcile.
         DB::query('INSERT INTO ' . DB::table(self::POST) . ' (' . implode(', ', $columns) . ') VALUES (' . implode(', ', $quoted) . ')'
             . ' ON DUPLICATE KEY UPDATE ' . implode(', ', $updates));
     }
@@ -141,11 +142,63 @@ final class MomoBird_DiscuzStore implements MomoBird_Store
         foreach (array_chunk(self::ids($tids), self::CHUNK) as $chunk) {
             $rows = array();
             foreach ($chunk as $tid) {
-                $rows[] = '(' . $tid . ", 'orphan', 1, " . $now . ')';
+                $rows[] = '(' . $tid . ", 'orphan', 1, 1, " . $now . ')';
+            }
+            DB::query('INSERT INTO ' . DB::table(self::POST) . ' (tid, state, remote, listed, updated_at) VALUES ' . implode(', ', $rows)
+                . ' ON DUPLICATE KEY UPDATE remote=1, listed=1');
+        }
+    }
+
+    public function clearListed(): void
+    {
+        DB::query('UPDATE %t SET listed=0 WHERE listed<>0', array(self::POST));
+    }
+
+    public function requeueUnlisted(int $since, int $now): int
+    {
+        $where = "state='synced' AND listed=0 AND updated_at<=" . max(0, $since);
+        $count = (int) DB::result_first('SELECT COUNT(*) FROM %t WHERE ' . $where, array(self::POST));
+        if ($count > 0) {
+            DB::query("UPDATE %t SET content_hash='' WHERE " . $where, array(self::POST));
+            DB::query("UPDATE %t SET queued_at=%d WHERE state='synced' AND listed=0 AND content_hash='' AND queued_at IS NULL", array(self::POST, max(0, $now)));
+        }
+        return $count;
+    }
+
+    public function rowsBetween(int $low, int $high, int $limit): array
+    {
+        if ($limit < 1 || $high < $low) {
+            return array();
+        }
+        $out = array();
+        foreach (DB::fetch_all("SELECT tid, remote FROM %t WHERE tid>=%d AND tid<=%d AND state NOT IN ('gone', 'orphan') ORDER BY tid DESC LIMIT %d",
+            array(self::POST, max(0, $low), $high, $limit)) as $row) {
+            $out[(int) $row['tid']] = (int) $row['remote'];
+        }
+        return $out;
+    }
+
+    public function markGone(array $tids, int $now): void
+    {
+        $now = max(0, $now);
+        foreach (array_chunk(self::ids($tids), self::CHUNK) as $chunk) {
+            $rows = array();
+            foreach ($chunk as $tid) {
+                $rows[] = '(' . $tid . ", 'gone', 1, " . $now . ')';
             }
             DB::query('INSERT INTO ' . DB::table(self::POST) . ' (tid, state, remote, updated_at) VALUES ' . implode(', ', $rows)
-                . ' ON DUPLICATE KEY UPDATE remote=1');
+                . " ON DUPLICATE KEY UPDATE state='gone', remote=1, updated_at=VALUES(updated_at)");
         }
+    }
+
+    public function resetSync(int $now): int
+    {
+        $now = max(0, $now);
+        DB::query("DELETE FROM %t WHERE state IN ('orphan', 'gone') AND queued_at IS NULL", array(self::POST));
+        DB::query("UPDATE %t SET state='pending', content_hash='', body_hash='', remote=0, attempts=0, last_error='', listed=0, updated_at=%d",
+            array(self::POST, $now));
+        DB::query('UPDATE %t SET queued_at=%d WHERE queued_at IS NULL', array(self::POST, $now));
+        return (int) DB::result_first('SELECT COUNT(*) FROM %t', array(self::POST));
     }
 
     public function clearOrphans(): void

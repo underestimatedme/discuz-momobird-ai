@@ -469,6 +469,14 @@ mb_test('admin page: a held cleanup shows the confirm withdraw button', function
     mb_assert(strpos($html, '30') !== false, 'count shown');
 });
 
+mb_test('admin page: threads missing from the forum held by the guard are explained', function () {
+    $w = mb_ap();
+    $w->store->set('gone_guard', array('held' => true, 'reason' => 'missing', 'would_remove' => 25, 'message' => 'x', 'at' => 1, 'confirmed' => false));
+    $html = mb_ap_get($w);
+    mb_assert(strpos($html, 'data-mb-action="confirm_withdraw"') !== false, 'confirm button');
+    mb_assert(strpos($html, '论坛里读不到 25 篇') !== false, 'missing-thread text: ' . strip_tags($html));
+});
+
 mb_test('admin page: the failure list shows title, error code and time', function () {
     $w = mb_ap(array('formatTime' => function ($t) {
         return 'T' . $t;
