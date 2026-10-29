@@ -948,8 +948,9 @@ mb_test('a forum read exception mid-drain keeps the queue and changes nothing', 
     mb_assert_same('synced', $w->store->state(11), 'row untouched');
     mb_assert_same(array(), $w->server->deletedIds(), 'nothing withdrawn');
 
-    // First posts that all vanish at once are a read failure, not a withdrawal.
+    // First posts that all vanish at once for threads that could sync are a read failure, not a withdrawal.
     $w->forum->onRead = null;
+    $w->forum->threads[11]['displayorder'] = 0;
     $w->forum->posts = array();
     mb_se_sync($w, array(12, 11));
     mb_assert_same(array(), $w->server->deletedIds(), 'no withdrawal on missing first posts');
@@ -999,4 +1000,52 @@ mb_test('fingerprint-requeued threads go first and withdrawals go 100 per reques
     mb_assert_same(2, $w->server->count('POST /posts/delete'), '150 ids in two requests');
     mb_assert_same(100, count($w->server->bodies('POST /posts/delete')[0]['external_ids']), '100 in the first');
     mb_assert_same(150, count($w->server->posts), 'forum 3 pushed afterwards');
+});
+
+// ---------------------------------------------------------------- fix round 2
+
+/** "Move with redirect" leaves a stub thread (closed = new tid) that has no posts. */
+function mb_se_stubs(stdClass $w, array $tids): void
+{
+    foreach ($tids as $tid) {
+        $w->forum->addThread($tid, 2, null, array('closed' => 9999));
+        unset($w->forum->posts[$tid]);
+    }
+}
+
+mb_test('redirect stubs without posts do not stop a full sync', function () {
+    $w = mb_se();
+    mb_se_threads($w, range(1, 10));
+    mb_se_stubs($w, range(11, 35));
+    $first = $w->engine->fullSyncBatch(null);
+    mb_assert_same(null, $first['result']->error, 'no read failure');
+    mb_se_full_from($w, $first['cursor']);
+    mb_assert_same(10, count($w->server->posts), 'real threads pushed');
+    mb_assert($w->engine->status()['last_full_sync_at'] !== null, 'full sync finished');
+    mb_assert_same(null, $w->engine->status()['read_error'], 'no read error');
+});
+
+mb_test('a queue of redirect stubs does not abort the tick', function () {
+    $w = mb_se();
+    mb_se_stubs($w, array(11, 12, 13));
+    $w->engine->enqueue(array(11, 12, 13), 'hook');
+    $result = $w->engine->cronTick(mb_se_deadline($w));
+    mb_assert_same(null, $result->error, 'no read failure');
+    mb_assert_same(0, $w->store->countQueued(), 'queue processed');
+    mb_assert_same(null, $w->engine->status()['read_error'], 'no read error');
+});
+
+mb_test('a failed read keeps the priority of requeued threads', function () {
+    $w = mb_se();
+    mb_se_threads($w, array(11, 12));
+    $w->engine->enqueue(array(11), 'fingerprint');
+    $w->store->enqueue(array(11), $w->clock->now, true, true);
+    $w->engine->enqueue(array(12), 'hook');
+    $w->forum->onRead = function ($what) {
+        if (strpos($what, 'threads:') === 0) {
+            throw new RuntimeException('gone away');
+        }
+    };
+    $w->engine->drain(mb_se_deadline($w));
+    mb_assert_same(array(11, 12), $w->store->queued(10), 'priority thread still first');
 });

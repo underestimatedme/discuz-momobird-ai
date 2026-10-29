@@ -166,7 +166,7 @@ final class MomoBird_SyncEngine
         if ($this->store->get('reconcile') === null) {
             $this->settleOrphans($run, $deadline, false, null, null);
         }
-        $this->maybeEnableWidget($run);
+        $this->maybeEnableWidget($run, $deadline);
     }
 
     /**
@@ -263,7 +263,7 @@ final class MomoBird_SyncEngine
             $full['finished_at'] = $this->now();
             $this->store->set('full_sync', $full);
             $this->refreshStatusCache($run);
-            $this->maybeEnableWidget($run);
+            $this->maybeEnableWidget($run, $deadline);
         }
         return $stop;
     }
@@ -720,12 +720,21 @@ final class MomoBird_SyncEngine
             if (!$tids) {
                 return;
             }
+            $priority = array();
+            foreach ($this->store->posts($tids) as $tid => $row) {
+                if (!empty($row['priority'])) {
+                    $priority[] = $tid;
+                }
+            }
             $this->store->dequeue($tids);
             try {
                 $this->processTids($run, $ctx, $tids, $deadline);
             } catch (MomoBird_ForumReadError $e) {
-                // Read before anything was decided: put them back untouched.
+                // Read before anything was decided: put them back untouched, priority included.
                 $this->store->enqueue($tids, $this->now(), false);
+                if ($priority) {
+                    $this->store->enqueue($priority, $this->now(), true, true);
+                }
                 throw $e;
             }
         }
@@ -734,7 +743,7 @@ final class MomoBird_SyncEngine
     private function processTids(MomoBird_SyncResult $run, array $ctx, array $tids, int $deadline): void
     {
         $threads = (array) $this->src('threads', array($tids));
-        $posts = $threads ? $this->firstPostsOf($threads) : array();
+        $posts = $this->postsFor($ctx, $threads);
         $rows = $this->store->posts($tids);
         $push = array();
         $withdraw = array();
@@ -745,6 +754,23 @@ final class MomoBird_SyncEngine
         // Withdrawals first: keeping hidden content out matters more than pushing.
         $this->sendWithdrawals($run, $withdraw, $deadline, false);
         $this->sendPushes($run, $push, $deadline);
+    }
+
+    /**
+     * First posts of the threads that could sync on thread level (precheck null or only
+     * not_selected). Rejected threads are decided without a post: redirect stubs left by
+     * "move with redirect" (closed > 1) have no posts at all and must not look like a failed read.
+     */
+    private function postsFor(array $ctx, array $threads): array
+    {
+        $need = array();
+        foreach ($threads as $tid => $thread) {
+            $reason = $this->precheck($ctx, $thread);
+            if ($reason === null || $reason === 'not_selected') {
+                $need[$tid] = $thread;
+            }
+        }
+        return $need ? $this->firstPostsOf($need) : array();
     }
 
     /**
@@ -1512,9 +1538,10 @@ final class MomoBird_SyncEngine
      * owner) is left alone and never touched again; WIDGET_NOT_READY and network trouble
      * are tried again on a later run.
      */
-    private function maybeEnableWidget(MomoBird_SyncResult $run): void
+    private function maybeEnableWidget(MomoBird_SyncResult $run, int $deadline): void
     {
-        if (!$this->settings->widgetEnabled() || $this->store->get('widget_enable') !== null || $this->stopped($run)) {
+        if (!$this->settings->widgetEnabled() || $this->store->get('widget_enable') !== null || $this->stopped($run)
+            || !$this->hasTime($deadline)) {
             return;
         }
         $full = $this->store->get('full_sync');
@@ -1545,7 +1572,9 @@ final class MomoBird_SyncEngine
         }
         $this->store->set('widget_enable', array('at' => $this->now(), 'result' => 'enabled'));
         $run->note('已开启问答助手');
-        $this->refreshStatusCache($run);
+        if ($this->hasTime($deadline)) {
+            $this->refreshStatusCache($run);
+        }
     }
 
     // ================================================================ full sync
@@ -1578,7 +1607,7 @@ final class MomoBird_SyncEngine
                 foreach ($chunk as $thread) {
                     $threads[(int) $thread['tid']] = $thread;
                 }
-                $posts = $this->firstPostsOf($threads);
+                $posts = $this->postsFor($ctx, $threads);
                 $stored = $this->store->posts(array_keys($threads));
                 foreach ($threads as $tid => $thread) {
                     $d = $this->decide($ctx, $tid, $thread, $posts[$tid] ?? null);

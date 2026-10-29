@@ -35,7 +35,7 @@
  */
 interface MomoBird_Store
 {
-    /** @return array<int, array> tid => row, for the tids that have a row */
+    /** @return array<int, array> tid => row (every column, priority and queued_at included), for the tids that have a row */
     public function posts(array $tids): array;
 
     /** Insert or update a row. Writes every column except queued_at (a new row gets NULL). */
