@@ -37,6 +37,14 @@ function mb_assert_throws($callback, $className)
     throw new RuntimeException('Expected ' . $className . ' to be thrown');
 }
 
-foreach (glob(dirname(__DIR__) . '/momobird_ai/lib/*.php') as $mb_lib_file) {
-    require_once $mb_lib_file;
-}
+// MomoBird_Foo lives in momobird_ai/lib/Foo.php; autoloading keeps interfaces
+// loaded before the classes that implement them.
+spl_autoload_register(function ($class) {
+    if (strpos($class, 'MomoBird_') !== 0) {
+        return;
+    }
+    $file = dirname(__DIR__) . '/momobird_ai/lib/' . substr($class, 9) . '.php';
+    if (is_file($file)) {
+        require_once $file;
+    }
+});
