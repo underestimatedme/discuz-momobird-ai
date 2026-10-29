@@ -125,6 +125,12 @@ function mb_ap_no_key(string $text, string $where): void
 
 // ---------------------------------------------------------------- the key
 
+mb_test('admin page: the key hint names the console path that exists', function () {
+    $html = mb_ap_get(mb_ap());
+    mb_assert(strpos($html, '「知识库 → 连接博客 → 博客 / 论坛」') !== false, 'real console path');
+    mb_assert(strpos($html, '新增来源') === false, 'no made-up console path');
+});
+
 mb_test('admin page: the html never contains the key, only its prefix', function () {
     $w = mb_ap();
     $html = mb_ap_get($w);

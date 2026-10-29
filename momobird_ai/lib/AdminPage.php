@@ -399,7 +399,7 @@ final class MomoBird_AdminPage
             . '<table class="tb tb2">'
             . '<tr><th colspan="15" class="partition">连接</th></tr>'
             . self::row('连接密钥', '<input type="password" class="txt" name="mb[' . self::KEY_FIELD . ']" value="" autocomplete="new-password" placeholder="mbk_…" />',
-                $prefix . '<br />在 MomoBird 控制台「知识 → 新增来源 → 博客 / 论坛 → Discuz!」生成。')
+                $prefix . '<br />在 MomoBird 控制台「知识库 → 连接博客 → 博客 / 论坛」选 Discuz! 生成。')
             . self::row('MomoBird Base URL', '<input type="text" class="txt" name="mb[baseUrl]" value="' . self::h($v('baseUrl', MomoBird_Settings::DEFAULT_BASE_URL)) . '" />',
                 '一般不用改。必须是 https:// 开头的公网地址。')
             . self::row('请求超时（秒）', '<input type="text" class="txt" name="mb[timeout]" value="' . self::h($v('timeout', MomoBird_Settings::DEFAULT_TIMEOUT)) . '" />',
