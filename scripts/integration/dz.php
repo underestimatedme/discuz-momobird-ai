@@ -7,6 +7,7 @@
  *   php /opt/it/dz.php cron-arm             make the plugin cron due on the next page view
  *   php /opt/it/dz.php enqueue <tid>...     queue threads the way a hook does (no network)
  *   php /opt/it/dz.php drain                one engine drain, prints the result as JSON
+ *   php /opt/it/dz.php round-due            make the daily scan round due on the next tick
  *
  * Discuz! clears non-superglobal globals in init(), so arguments are read from
  * $_SERVER['argv']. The cron is not started here (init_cron = false).
@@ -123,6 +124,17 @@ switch ($it_command) {
     case 'cron-arm':
         DB::query("UPDATE %t SET available=1, nextrun=0 WHERE type='plugin'", array('common_cron'));
         savecache('cronnextrun', 0);
+        it_out(array('ok' => true));
+        break;
+
+    case 'round-due':
+        // A day has passed since the last scan round started: the next tick starts a new round.
+        require_once DISCUZ_ROOT . 'source/plugin/momobird_ai/lib/Bootstrap.php';
+        $store = MomoBird_Bootstrap::store();
+        $scan = $store->get('scan') ?: array();
+        $scan['active'] = false;
+        $scan['round_started_at'] = time() - 86401;
+        $store->set('scan', $scan);
         it_out(array('ok' => true));
         break;
 

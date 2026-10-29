@@ -38,8 +38,8 @@ CHECK=$(mktemp -d)
 trap 'rm -rf "$STAGE" "$CHECK"' EXIT
 unzip -q "$ZIP" -d "$CHECK"
 # The only "mbk_" allowed is the literal key-format hint in the UI text and the redaction pattern;
-# a key is mbk_ followed by 20+ key characters.
-if grep -rEn 'mbk_[A-Za-z0-9_-]{20,}' "$CHECK"; then fail "a connection key is in the archive"; fi
+# a key is mbk_ followed by 16 or more key characters.
+if grep -rEn 'mbk_[A-Za-z0-9_-]{16,}' "$CHECK"; then fail "a connection key is in the archive"; fi
 for secret in 'DISCUZLOCALTESTKEY' 'Admin#12345' 'Member#12345' 'it-root-pw' 'rootpw'; do
   if grep -rnF "$secret" "$CHECK"; then fail "test credential \"$secret\" is in the archive"; fi
 done

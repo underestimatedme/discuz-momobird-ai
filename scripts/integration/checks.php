@@ -523,6 +523,36 @@ $it->check('E3', 'DiscuzStore lock: an overlapping drain reports busy; an expire
     return 'second drain busy, expired row taken over and released';
 });
 
+// No hook, no copy: merge and a wiped document ---------------------------------------------------
+$it->check('E6', 'a thread merged away (no hook for it) is withdrawn and a thread MomoBird lost is pushed again by the next round', function () use ($it) {
+    $mark = $it->mark();
+    $a = newThread($it, 2, 'MB-M1 合并目标', '合并目标正文 MBMERGEA');
+    $b = newThread($it, 2, 'MB-M2 被合并的主题', '被合并正文 MBMERGEB');
+    $c = newThread($it, 2, 'MB-M3 MomoBird 丢了的主题', '丢失正文 MBLOST');
+    $it->settle();
+    foreach (array($a, $b, $c) as $tid) {
+        expectPush($it, $mark, $tid, '默认版块');
+    }
+    // topicadmin merge: B's posts move into A and B's thread row is deleted without a hook for B.
+    $it->admin->post('forum.php?mod=topicadmin&action=merge&fid=2&tid=' . $a . '&infloat=yes&inajax=1', array(
+        'formhash' => $it->formhash, 'othertid' => $b, 'modsubmit' => 'yes', 'reason' => '', 'sendreasonpm' => 0, 'handlekey' => 'mods',
+    ));
+    it_assert(threadRow($it, $b) === null, 'B was not merged away: ' . it_short(threadRow($it, $b)));
+    $it->settle();
+    it_assert(isset($it->mockPosts()[(string) $b]), 'B is still on MomoBird before the round (no hook covers it)');
+    // C disappears from MomoBird (deleted in the console).
+    $it->sh('docker exec ' . escapeshellarg($it->prefix . '-mock') . ' php -r ' . escapeshellarg(
+        '$f="/mock/store.json"; $s=json_decode(file_get_contents($f), true); unset($s["posts"]["' . $c . '"]); file_put_contents($f, json_encode($s, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));'));
+    $mark = $it->mark();
+    $it->dz('round-due');
+    $it->cron();
+    $it->cron();
+    it_assert($it->withdrawn($mark, $b), 'merged-away thread not withdrawn: ' . it_short($it->since($mark)));
+    expectPush($it, $mark, $c, '默认版块');
+    it_assert(!isset($it->mockPosts()[(string) $b]) && isset($it->mockPosts()[(string) $c]), 'mock state after the round');
+    return "merged tid $b withdrawn, lost tid $c pushed again";
+});
+
 // MomoBird down or slow ----------------------------------------------------------------------------
 $it->check('C14', 'posting while MomoBird is down or slow takes no longer; the cron catches up afterwards', function () use ($it) {
     $times = array();
