@@ -16,8 +16,10 @@ final class MomoBird_Visibility
     /*
      * Columns the adapter must select. A missing column fails closed, so a forgotten
      * one shows up as "nothing syncs" instead of a leak. Join the author columns of
-     * POST_COLUMNS from common_member (username, groupid) and common_member_status
-     * (memberstatus) with LEFT JOINs; NULL there means "no such row".
+     * POST_COLUMNS from common_member: username, groupid, and status as memberstatus
+     * (forum_viewthread.php sets $postuser['memberstatus'] = $postuser['status']);
+     * NULL there means "no such row". The Discuz! adapter reads them with
+     * C::t('common_member')->fetch_all(), which also finds archived members.
      */
     /** forum_thread */
     const THREAD_COLUMNS = array('tid', 'displayorder', 'closed', 'readperm', 'price', 'isgroup', 'digest');

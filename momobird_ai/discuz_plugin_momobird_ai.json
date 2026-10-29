@@ -1,0 +1,52 @@
+{
+    "Title": "Discuz! Plugin",
+    "Data": {
+        "plugin": {
+            "available": "1",
+            "adminid": "1",
+            "name": "MomoBird AI",
+            "identifier": "momobird_ai",
+            "description": "把游客能看到的主题同步到 MomoBird 知识库，在论坛里提供问答助手和 AI 播客。",
+            "datatables": "momobird_ai_post,momobird_ai_kv",
+            "directory": "momobird_ai/",
+            "copyright": "MomoBird",
+            "version": "0.1.0",
+            "__modules": [
+                {
+                    "name": "admincp",
+                    "menu": "MomoBird AI",
+                    "url": "",
+                    "type": "3",
+                    "adminid": "1",
+                    "displayorder": "0"
+                },
+                {
+                    "name": "momobird_ai",
+                    "menu": "",
+                    "url": "",
+                    "type": "11",
+                    "adminid": "0",
+                    "displayorder": "0"
+                },
+                {
+                    "name": "momobird_ai",
+                    "menu": "",
+                    "url": "",
+                    "type": "28",
+                    "adminid": "0",
+                    "displayorder": "0"
+                }
+            ]
+        },
+        "version": "X3.5,X5.0",
+        "intro": "只同步游客能读到的主帖，按版块分类；发帖、编辑、删除和前台管理后自动同步，每 5 分钟处理队列，每天对账一轮。设置在插件自带的「MomoBird AI」页面里，连接密钥只写不读。只支持 UTF-8 编码的论坛。",
+        "installfile": "install.php",
+        "uninstallfile": "uninstall.php",
+        "upgradefile": "upgrade.php",
+        "language": {
+            "scriptlang": {
+                "momobird_ai_cron": "MomoBird AI 同步"
+            }
+        }
+    }
+}

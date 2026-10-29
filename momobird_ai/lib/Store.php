@@ -31,7 +31,7 @@
  *   orphan    MomoBird holds it but the forum should not (MomoBird-only id, or a thread hidden
  *             only by the plugin's forum selection): waits for the cleanup guard
  *
- * Locks: lock()/unlock() give one engine run at a time (the adapter uses discuz_process).
+ * Locks: lock()/unlock() give one engine run at a time (the adapter keeps them as kv rows; see MomoBird_DiscuzStore).
  */
 interface MomoBird_Store
 {
