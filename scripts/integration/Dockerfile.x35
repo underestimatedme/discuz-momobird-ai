@@ -1,0 +1,8 @@
+# Discuz! X3.5 test web server: PHP 7.4 (the plugin's oldest PHP) under Apache mod_php.
+# mod_php has no fastcgi_finish_request(), so this suite covers the cron path.
+# gd is left out: its bullseye-security packages are archived and the tests post no images.
+FROM php:7.4-apache
+RUN docker-php-ext-install -j2 mysqli \
+ && mv "$PHP_INI_DIR/php.ini-development" "$PHP_INI_DIR/php.ini" \
+ && printf 'log_errors=On\nerror_log=/var/log/php-errors.log\n' > "$PHP_INI_DIR/conf.d/zz-it.ini" \
+ && touch /var/log/php-errors.log && chown www-data:www-data /var/log/php-errors.log

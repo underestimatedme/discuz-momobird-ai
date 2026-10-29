@@ -1,0 +1,13 @@
+# Discuz! X5.0 test web server: PHP 8.2 FPM behind nginx, so hooks take the
+# after-response path (fastcgi_finish_request) the plugin uses on FPM hosts.
+FROM php:8.2-fpm
+RUN apt-get update && apt-get install -y --no-install-recommends nginx libpng-dev libjpeg-dev libfreetype6-dev \
+ && rm -rf /var/lib/apt/lists/* \
+ && docker-php-ext-configure gd --with-jpeg --with-freetype && docker-php-ext-install -j2 mysqli gd \
+ && mv "$PHP_INI_DIR/php.ini-development" "$PHP_INI_DIR/php.ini" \
+ && printf 'log_errors=On\nerror_log=/var/log/php-errors.log\n' > "$PHP_INI_DIR/conf.d/zz-it.ini" \
+ && touch /var/log/php-errors.log && chown www-data:www-data /var/log/php-errors.log \
+ && printf '[www]\npm.status_path = /fpm-status\ncatch_workers_output = yes\n' > /usr/local/etc/php-fpm.d/zz-it.conf \
+ && rm -f /etc/nginx/sites-enabled/default
+COPY nginx-x5.conf /etc/nginx/conf.d/discuz.conf
+CMD ["sh", "-c", "php-fpm -D && exec nginx -g 'daemon off;'"]

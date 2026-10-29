@@ -11,6 +11,9 @@
 //   MOCK_SOURCE_KIND  source kind reported by /status (default discuz)
 //   MOCK_STORE        JSON state file           (default <tmp>/momobird-discuz-mock.json)
 //   MOCK_LOG          request log, one JSON per line (default <tmp>/momobird-discuz-mock.log)
+//
+// While the file MOCK_STORE.delay exists, every request waits that many
+// milliseconds first (a slow MomoBird, for the integration tests).
 
 const PREFIX = '/momobird/api/public/connect/v1';
 
@@ -37,6 +40,11 @@ function out($status, $body)
 function ok($data)
 {
     out(200, array('code' => 'OK', 'data' => $data));
+}
+
+$delay = $store . '.delay';
+if (is_file($delay)) {
+    usleep(max(0, min(60000, (int) trim((string) file_get_contents($delay)))) * 1000);
 }
 
 $state = is_file($store) ? json_decode(file_get_contents($store), true) : null;

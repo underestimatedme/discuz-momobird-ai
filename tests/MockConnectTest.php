@@ -169,3 +169,17 @@ mb_test('mock connect rejects a wrong key and can report another source kind', f
         mb_assert_same('wordpress', $client->status()['source']['kind'], 'MOCK_SOURCE_KIND');
     }, array('MOCK_SOURCE_KIND' => 'wordpress'));
 });
+
+mb_test('mock connect answers late while its delay file holds milliseconds', function () {
+    mb_mock_run(function (MomoBird_ConnectClient $client, string $store) {
+        $start = microtime(true);
+        $client->status();
+        mb_assert(microtime(true) - $start < 0.5, 'no delay without the file');
+
+        file_put_contents($store . '.delay', '700');
+        $start = microtime(true);
+        $client->status();
+        mb_assert(microtime(true) - $start >= 0.7, 'the delay file slows every request');
+        unlink($store . '.delay');
+    });
+});
