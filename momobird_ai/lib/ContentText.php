@@ -12,20 +12,26 @@
 class MomoBird_ContentText
 {
     /** Tags that wrap hidden or duplicated content; nesting is tracked and an unclosed one swallows the rest. */
-    private static $guardedTags = array('hide', 'quote', 'password', 'groupid', 'postappend');
+    private static $guardedTags = array('hide', 'quote', 'groupid', 'postappend');
 
     /** Tags whose whole span is dropped (no nesting expected). */
     private static $dropTags = array('attach', 'attachimg', 'img', 'media', 'audio', 'flash', 'swf', 'payto');
 
+    /** Longest input converted; anything beyond is cut (on a UTF-8 boundary) before any regex work. */
+    const MAX_BYTES = 2097152;
+
+    /** A [password] tag anywhere: Discuz shows guests an empty post, so the text is empty here too. */
+    const PASSWORD_PATTERN = '/\[password(?:=[^\]]{0,200})?\]/i';
+
     /** Tags that only format: the markup goes, the text stays. */
-    private static $keepTextTags = array('b', 'i', 'u', 's', 'p', 'color', 'backcolor', 'size', 'font', 'align', 'indent', 'float', 'free', 'md', 'url', 'code', 'email', 'table', 'tr', 'th', 'td', 'list');
+    private static $keepTextTags = array('b', 'i', 'u', 's', 'p', 'color', 'backcolor', 'size', 'font', 'align', 'indent', 'float', 'free', 'md', 'url', 'code', 'email', 'table', 'tr', 'th', 'td', 'list', 'password');
 
     /**
      * Discuz! post message (BBCode, optionally with HTML) to plain text.
      */
-    public static function fromBbcode($message)
+    public static function fromBbcode(string $message): string
     {
-        $text = self::utf8((string) $message);
+        $text = self::utf8(self::cap($message));
         $text = str_replace(array("\r\n", "\r"), "\n", $text);
 
         // Special thread data (poll options, activity fields, ...) follows three NULs.
@@ -34,6 +40,10 @@ class MomoBird_ContentText
             $text = substr($text, 0, $nul);
         }
         $text = str_replace("\0", '', $text);
+
+        if (preg_match(self::PASSWORD_PATTERN, $text) !== 0) {
+            return '';
+        }
 
         $text = self::removeHidden($text);
 
@@ -56,9 +66,9 @@ class MomoBird_ContentText
     /**
      * X5 EditorJS JSON to plain text. Null when the input is not JSON or has no blocks.
      */
-    public static function fromX5Json($json)
+    public static function fromX5Json(string $json): ?string
     {
-        $data = json_decode((string) $json, true);
+        $data = json_decode($json, true);
         if (!is_array($data)) {
             return null;
         }
@@ -88,20 +98,30 @@ class MomoBird_ContentText
             }
         }
 
-        return implode("\n\n", $parts);
+        // Hide/quote spans are removed over the whole joined text so a tag opened in
+        // one block and closed in a later one takes everything in between with it.
+        $text = self::utf8(self::cap(implode("\n\n", $parts)));
+        if (preg_match(self::PASSWORD_PATTERN, $text) !== 0) {
+            return '';
+        }
+        $text = self::removeHidden($text);
+        $text = self::replace('/\[\/(?:' . implode('|', self::$guardedTags) . ')\]/i', '', $text);
+        $text = self::replace('/\n{3,}/', "\n\n", $text);
+
+        return trim($text);
     }
 
     /**
      * Title line plus body, the document the knowledge base stores. Empty when there is no body.
      */
-    public static function document($title, $body)
+    public static function document(string $title, string $body): string
     {
-        $body = trim((string) $body);
+        $body = trim($body);
         if ($body === '') {
             return '';
         }
 
-        $title = self::utf8((string) $title);
+        $title = self::utf8($title);
         $title = html_entity_decode(strip_tags($title), ENT_QUOTES | ENT_HTML5, 'UTF-8');
         $title = trim(self::replace('/[\s\x{00A0}\x{3000}]+/u', ' ', $title));
         if ($title === '') {
@@ -151,8 +171,7 @@ class MomoBird_ContentText
         if (!is_string($value)) {
             return '';
         }
-        $text = self::removeHidden(self::utf8($value));
-        return self::normalizeSpace(self::htmlToText($text));
+        return self::normalizeSpace(self::htmlToText(self::utf8($value)));
     }
 
     private static function inlineText($value)
@@ -165,7 +184,7 @@ class MomoBird_ContentText
         if (!is_string($value)) {
             return '';
         }
-        $text = self::removeHidden(self::utf8($value));
+        $text = self::utf8($value);
         $text = str_replace(array("\r\n", "\r"), "\n", $text);
         $text = html_entity_decode(strip_tags($text), ENT_QUOTES | ENT_HTML5, 'UTF-8');
         return trim($text, "\n");
@@ -202,10 +221,12 @@ class MomoBird_ContentText
      */
     private static function removeHidden($text)
     {
+        // Guarded spans first: an edit note must not be able to swallow a [hide] opener
+        // and leave its closer behind.
+        $text = self::removeGuardedSpans($text);
+
         // "本帖最后由 ... 编辑" notes.
         $text = self::dropSpans($text, '/\[i=s\]/i', '[/i]');
-
-        $text = self::removeGuardedSpans($text);
 
         foreach (self::$dropTags as $tag) {
             $text = self::dropSpans($text, '/\[' . $tag . '(?:=[^\]]{0,200})?\]/i', '[/' . $tag . ']');
@@ -215,45 +236,53 @@ class MomoBird_ContentText
     }
 
     /**
-     * Removes [hide]/[quote]/... spans with proper nesting. A span that is never
-     * closed runs to the end of the text.
+     * Removes [hide]/[quote]/... spans. Tags may be nested or crossed: a closing tag
+     * only closes one open tag of its own name, every other open tag stays open, and
+     * the text is dropped from the first open tag until nothing is open any more. A span
+     * that is never closed runs to the end of the text.
      */
     private static function removeGuardedSpans($text)
     {
         $names = implode('|', self::$guardedTags);
-        $count = preg_match_all('/\[(' . $names . ')(?:=[^\]]{0,200})?\]|\[\/(' . $names . ')\]/i', $text, $matches, PREG_SET_ORDER | PREG_OFFSET_CAPTURE);
-        if ($count === false) {
-            return '';
-        }
-        if ($count === 0) {
-            return $text;
-        }
+        $pattern = '/\[(' . $names . ')(?:=[^\]]{0,200})?\]|\[\/(' . $names . ')\]/i';
 
-        $stack = array();
+        $total = 0;
+        $open = array();
         $ranges = array();
-        foreach ($matches as $match) {
+        $rangeStart = 0;
+        $offset = 0;
+        while (true) {
+            $found = preg_match($pattern, $text, $match, PREG_OFFSET_CAPTURE, $offset);
+            if ($found === false) {
+                return '';
+            }
+            if ($found === 0) {
+                break;
+            }
             $start = $match[0][1];
             $end = $start + strlen($match[0][0]);
-            if (isset($match[2]) && $match[2][1] >= 0 && $match[2][0] !== '') {
-                // Closing tag: close the nearest open tag of the same name, and everything opened inside it.
+            $offset = $end;
+            if (isset($match[2]) && $match[2][0] !== '') {
                 $name = strtolower($match[2][0]);
-                for ($i = count($stack) - 1; $i >= 0; $i--) {
-                    if ($stack[$i][0] === $name) {
-                        if ($i === 0) {
-                            $ranges[] = array($stack[0][1], $end);
-                        }
-                        while (count($stack) > $i) {
-                            array_pop($stack);
-                        }
-                        break;
-                    }
+                if (empty($open[$name])) {
+                    continue; // stray closer: nothing to close
+                }
+                $open[$name]--;
+                $total--;
+                if ($total === 0) {
+                    $ranges[] = array($rangeStart, $end);
                 }
             } else {
-                $stack[] = array(strtolower($match[1][0]), $start);
+                $name = strtolower($match[1][0]);
+                if ($total === 0) {
+                    $rangeStart = $start;
+                }
+                $total++;
+                $open[$name] = (isset($open[$name]) ? $open[$name] : 0) + 1;
             }
         }
-        if ($stack) {
-            $ranges[] = array($stack[0][1], strlen($text));
+        if ($total > 0) {
+            $ranges[] = array($rangeStart, strlen($text));
         }
 
         $out = '';
@@ -290,6 +319,14 @@ class MomoBird_ContentText
         $text = implode("\n", $lines);
         $text = self::replace('/\n{3,}/', "\n\n", $text);
         return trim($text);
+    }
+
+    /**
+     * Cuts the text to MAX_BYTES; the cut may split a character, utf8() drops the fragment.
+     */
+    private static function cap($text)
+    {
+        return strlen($text) > self::MAX_BYTES ? substr($text, 0, self::MAX_BYTES) : $text;
     }
 
     /**

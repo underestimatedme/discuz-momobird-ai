@@ -104,7 +104,11 @@ mb_test('content never contains hidden text', function () {
         '[swf]SECRET_SWF[/swf]',
         '[payto=1]SECRET_PAYTO[/payto]',
         '[i=s] SECRET_EDITNOTE [/i]',
-        '[password]SECRET_PASSWORD[/password]',
+        '[hide=d30, 50]SECRET_HIDE_SPACE[/hide]',
+        '[quote][hide]SECRET_HIDE_IN_QUOTE[/hide][/quote]',
+        'A[quote]x[hide]SECRET_CROSS1[/quote]more_SECRET_CROSS2[/hide]B',
+        'A[i=s]x[hide]SECRET_CROSS3[/i]SECRET_CROSS4[/hide]B',
+        'A[hide]x[quote]SECRET_CROSS5[/hide]SECRET_CROSS6[/quote]B',
         '[groupid=1]SECRET_GROUP[/groupid]',
         '[postappend]SECRET_APPEND[/postappend]',
         '可见结尾',
@@ -114,6 +118,38 @@ mb_test('content never contains hidden text', function () {
     mb_assert(strpos($out, '可见开头') !== false && strpos($out, '可见结尾') !== false, 'visible text was lost: ' . $out);
     mb_assert(strpos($out, 'SECRET') === false, 'hidden text leaked: ' . $out);
     mb_assert(!preg_match('/\[\/?(hide|quote|attach|attachimg|img|media|audio|flash|swf|payto|password|groupid|postappend|i)\b/i', $out), 'hidden tag markup left behind: ' . $out);
+});
+
+mb_test('crossed guarded tags never leak', function () {
+    foreach (array(
+        'A[quote]x[hide]SECRET1[/quote]more_SECRET2[/hide]B',
+        'A[i=s]x[hide]SECRET[/i]LEAK[/hide]B',
+        'A[hide]x[quote]SECRET1[/hide]SECRET2[/quote]B',
+        'A[hide]x[groupid=1]SECRET1[/hide]SECRET2[/groupid]B',
+    ) as $input) {
+        $out = mb_bb($input);
+        mb_assert(strpos($out, 'SECRET') === false && strpos($out, 'LEAK') === false, 'crossed tags leaked: ' . $input . ' => ' . $out);
+        mb_assert(strpos($out, 'A') === 0, 'text before the tags was lost: ' . $out);
+    }
+});
+
+mb_test('a password tag blanks the whole post', function () {
+    mb_assert_same('', mb_bb('PUBLIC [password]pw[/password] MORE'), 'password post should be empty');
+    mb_assert_same('', mb_bb('PUBLIC [PASSWORD=x]pw'), 'unclosed password tag should blank the post');
+});
+
+mb_test('groupid and postappend spans are removed', function () {
+    mb_assert_same('ab', mb_bb('a[groupid=7]SECRET[/groupid]b'), 'groupid leaked');
+    mb_assert_same('ab', mb_bb('a[postappend]SECRET[/postappend]b'), 'postappend leaked');
+});
+
+mb_test('oversized input is cut at 2 MiB on a character boundary', function () {
+    $text = str_repeat('你', 800000) . '[hide]x[/hide]' . 'TAIL_MARK';
+    $out = mb_bb($text);
+    mb_assert(strlen($out) <= 2 * 1024 * 1024, 'output longer than the cap: ' . strlen($out));
+    mb_assert(strpos($out, 'TAIL_MARK') === false, 'text beyond the cap was kept');
+    mb_assert(preg_match('//u', $out) === 1, 'cut produced invalid utf-8');
+    mb_assert(strpos($out, '你你') === 0, 'text before the cap was lost');
 });
 
 mb_test('document puts the title on one line before the body', function () {
@@ -204,4 +240,26 @@ mb_test('x5 text never contains hidden bbcode', function () {
     $out = MomoBird_ContentText::fromX5Json($json);
     mb_assert(strpos($out, 'SECRET') === false, 'hidden text leaked from x5 json: ' . $out);
     mb_assert(strpos($out, '可见') !== false && strpos($out, '正文') !== false, 'visible x5 text lost: ' . $out);
+});
+
+mb_test('x5 hide opened in one block and closed in a later one drops everything between', function () {
+    $json = mb_x5(array(
+        array('type' => 'paragraph', 'data' => array('text' => '开头[hide]SECRET_ONE')),
+        array('type' => 'header', 'data' => array('text' => 'SECRET_HEADER', 'level' => 2)),
+        array('type' => 'list', 'data' => array('style' => 'unordered', 'items' => array('SECRET_ITEM'))),
+        array('type' => 'code', 'data' => array('code' => 'SECRET_CODE')),
+        array('type' => 'paragraph', 'data' => array('text' => 'SECRET_TWO[/hide]结尾')),
+        array('type' => 'paragraph', 'data' => array('text' => '最后一段')),
+    ));
+    $out = MomoBird_ContentText::fromX5Json($json);
+    mb_assert(strpos($out, 'SECRET') === false, 'cross-block hide leaked: ' . $out);
+    mb_assert(strpos($out, '开头') === 0 && strpos($out, '最后一段') !== false, 'visible x5 text lost: ' . $out);
+});
+
+mb_test('x5 password tag blanks the post', function () {
+    $json = mb_x5(array(
+        array('type' => 'paragraph', 'data' => array('text' => '公开')),
+        array('type' => 'paragraph', 'data' => array('text' => '[password]pw[/password]')),
+    ));
+    mb_assert_same('', MomoBird_ContentText::fromX5Json($json), 'x5 password post should be empty');
 });
