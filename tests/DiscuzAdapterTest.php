@@ -86,3 +86,21 @@ mb_test('discuz adapter: a failed settings save never shows the key', function (
         MomoBird_Bootstrap::useStore(null);
     }
 });
+
+mb_test('discuz adapter: runs get room for the engine budget plus one request', function () {
+    require_once __DIR__ . '/FakeStore.php';
+    $store = new MomoBird_FakeStore();
+    $store->set('settings', array('timeout' => 25));
+    MomoBird_Bootstrap::useStore($store);
+    $limit = ini_get('max_execution_time');
+    $abort = ignore_user_abort();
+    try {
+        MomoBird_Bootstrap::allowRun();
+        mb_assert_same('75', ini_get('max_execution_time'), '20 s budget + 25 s timeout + 30 s');
+        mb_assert_same(1, ignore_user_abort(), 'keeps running when the admin leaves');
+    } finally {
+        set_time_limit((int) $limit);
+        ignore_user_abort((bool) $abort);
+        MomoBird_Bootstrap::useStore(null);
+    }
+});

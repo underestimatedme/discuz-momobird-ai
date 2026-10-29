@@ -30,6 +30,13 @@ final class MomoBird_AdminPage
     const ACTIONS = array('test', 'sync_batch', 'retry', 'confirm_withdraw');
     /** Stands in for a missing key while checking the other settings (a key may be added later). */
     const PLACEHOLDER_KEY = 'mbk_0000000000000000000000000000';
+    /**
+     * Name of the key input inside mb[...]. Discuz!'s admin log (discuz_admincp::writecplog, X3.5;
+     * admin class_core::writecplog, X5) records every GET and POST field except formhash, submit,
+     * addsubmit, admin_password, sid and action, at any depth. So the key travels only under this
+     * name; admincp's own login reads $_POST['admin_password'] at the top level, never mb[...].
+     */
+    const KEY_FIELD = 'admin_password';
     /** Part of MomoBird_Settings' key format message; never a key. */
     const KEY_HINT = '以 mbk_ 开头';
 
@@ -67,7 +74,9 @@ final class MomoBird_AdminPage
      * @param callable $save          function (array $values, ?string $key): void, throws a
      *                                RuntimeException with a redacted message (Bootstrap::saveSettings)
      * @param array    $env           supported (bool), charset, formhash, pageUrl, scriptUrl, siteUrl
-     *                                (Discuz!'s 站点 URL), httpHosts, formatTime (callable int => string)
+     *                                (Discuz!'s 站点 URL), httpHosts, formatTime (callable int => string),
+     *                                beforeRun (callable, called before anything that may reach MomoBird:
+     *                                PHP time limit and ignore_user_abort)
      */
     public function __construct(MomoBird_Store $store, MomoBird_ForumSource $source, callable $engineFactory, callable $save, array $env)
     {
@@ -84,6 +93,7 @@ final class MomoBird_AdminPage
             'siteUrl' => '',
             'httpHosts' => array(),
             'formatTime' => null,
+            'beforeRun' => null,
         );
     }
 
@@ -129,6 +139,7 @@ final class MomoBird_AdminPage
             return array('ok' => false, 'message' => '未知的操作。');
         }
         try {
+            $this->beforeRun();
             switch ($action) {
                 case 'test':
                     return $this->testConnection();
@@ -147,16 +158,24 @@ final class MomoBird_AdminPage
     private function testConnection(): array
     {
         $cached = $this->engine()->refreshStatus();
+        return array('ok' => !empty($cached['ok']), 'message' => self::connectionText($cached), 'status_html' => $this->statusSection());
+    }
+
+    /** 「连接正常：项目「…」。」 or 「连接失败：…」 for a refreshStatus() answer. */
+    private static function connectionText(array $cached): string
+    {
         if (!empty($cached['ok'])) {
             $name = isset($cached['project']['name']) && is_string($cached['project']['name']) ? $cached['project']['name'] : '';
-            $message = '连接正常' . ($name !== '' ? '：项目「' . $name . '」' : '') . '。';
-            $ok = true;
-        } else {
-            $error = isset($cached['error']) && is_string($cached['error']) ? $cached['error'] : '没有拿到 MomoBird 的回复';
-            $message = '连接失败：' . $error;
-            $ok = false;
+            return '连接正常' . ($name !== '' ? '：项目「' . $name . '」' : '') . '。';
         }
-        return array('ok' => $ok, 'message' => $message, 'status_html' => $this->statusSection());
+        return '连接失败：' . (isset($cached['error']) && is_string($cached['error']) ? $cached['error'] : '没有拿到 MomoBird 的回复');
+    }
+
+    private function beforeRun(): void
+    {
+        if (is_callable($this->env['beforeRun'])) {
+            call_user_func($this->env['beforeRun']);
+        }
     }
 
     /**
@@ -263,7 +282,7 @@ final class MomoBird_AdminPage
             }
         }
 
-        $key = isset($form['key']) && is_string($form['key']) ? trim($form['key']) : '';
+        $key = isset($form[self::KEY_FIELD]) && is_string($form[self::KEY_FIELD]) ? trim($form[self::KEY_FIELD]) : '';
         $storedSecret = $this->store->get(MomoBird_Settings::KV_SECRET);
         $hasStoredKey = isset($storedSecret['key']) && is_string($storedSecret['key']) && $storedSecret['key'] !== '';
         // A key may be added later; a key that was typed in must be valid.
@@ -272,7 +291,7 @@ final class MomoBird_AdminPage
         $errors = array_merge($candidate->validate(), $errors);
 
         // The form shows what was typed again, never the key.
-        unset($values['key']);
+        unset($values['key'], $values[self::KEY_FIELD]);
         if ($errors) {
             return array($this->notice(false, '设置没有保存，请改正下面的问题：', $errors), $values);
         }
@@ -294,10 +313,8 @@ final class MomoBird_AdminPage
         if (($key !== '' || $baseUrlChanged) && !$this->settings()->validate()) {
             // A new key (or server) clears a stop at once instead of waiting for the hourly check.
             try {
-                $cached = $this->engine()->refreshStatus();
-                $lines[] = !empty($cached['ok'])
-                    ? '已用新的设置检查连接：连接正常。'
-                    : '已用新的设置检查连接：连接失败：' . (isset($cached['error']) && is_string($cached['error']) ? $cached['error'] : '没有拿到 MomoBird 的回复');
+                $this->beforeRun();
+                $lines[] = '已用新的设置检查连接：' . self::connectionText($this->engine()->refreshStatus());
             } catch (Throwable $e) {
                 $lines[] = '检查连接失败：' . self::truncate($this->clean($e->getMessage()), 300);
             }
@@ -378,7 +395,7 @@ final class MomoBird_AdminPage
             . '<input type="hidden" name="formhash" value="' . self::h((string) $this->env['formhash']) . '" />'
             . '<table class="tb tb2">'
             . '<tr><th colspan="15" class="partition">连接</th></tr>'
-            . self::row('连接密钥', '<input type="password" class="txt" name="mb[key]" value="" autocomplete="new-password" placeholder="mbk_…" />',
+            . self::row('连接密钥', '<input type="password" class="txt" name="mb[' . self::KEY_FIELD . ']" value="" autocomplete="new-password" placeholder="mbk_…" />',
                 $prefix . '<br />在 MomoBird 控制台「知识 → 新增来源 → 博客 / 论坛 → Discuz!」生成。')
             . self::row('MomoBird Base URL', '<input type="text" class="txt" name="mb[baseUrl]" value="' . self::h($v('baseUrl', MomoBird_Settings::DEFAULT_BASE_URL)) . '" />',
                 '一般不用改。必须是 https:// 开头的公网地址。')
@@ -415,12 +432,17 @@ final class MomoBird_AdminPage
         $all = !is_array($forumIds);
 
         $options = '';
+        $kept = '';
         foreach ($tree['groups'] as $group) {
             $options .= '<optgroup label="' . self::h($group['name']) . '">';
             foreach ($group['forums'] as $forum) {
                 $label = ($forum['type'] === 'sub' ? '　└ ' : '') . $forum['name'];
                 if ($forum['reason'] !== null) {
                     $options .= '<option value="' . $forum['fid'] . '" disabled="disabled">' . self::h($label . '（游客不可见：' . $forum['reason'] . '）') . '</option>';
+                    if (in_array($forum['fid'], $selected, true)) {
+                        // Browsers do not send disabled options: keep the choice for when guests can read it again.
+                        $kept .= '<input type="hidden" name="mb[forumIds][]" value="' . $forum['fid'] . '" />';
+                    }
                 } else {
                     $options .= '<option value="' . $forum['fid'] . '"' . (in_array($forum['fid'], $selected, true) ? ' selected="selected"' : '') . '>' . self::h($label) . '</option>';
                 }
@@ -432,7 +454,7 @@ final class MomoBird_AdminPage
             . '<li' . ($all ? ' class="checked"' : '') . '><input class="radio" type="radio" name="mb[forumScope]" value="all"' . ($all ? ' checked="checked"' : '') . ' />&nbsp;全部游客可见的版块</li>'
             . '<li' . (!$all ? ' class="checked"' : '') . '><input class="radio" type="radio" name="mb[forumScope]" value="selected"' . (!$all ? ' checked="checked"' : '') . ' />&nbsp;只同步下面选中的版块</li>'
             . '</ul>';
-        $select = '<select name="mb[forumIds][]" multiple="multiple" size="12">' . $options . '</select>';
+        $select = '<select name="mb[forumIds][]" multiple="multiple" size="12">' . $options . '</select>' . $kept;
 
         return self::row('同步范围', $scope . $select,
             '只有游客能看到的主题才会同步。灰色的版块游客看不到，不会同步，括号里是原因。没选中的版块里的主题不同步，已经同步的会撤下（一次要撤下很多时会先请你确认）。按住 Ctrl（Mac 上是 Command）可以多选。');
@@ -678,7 +700,7 @@ final class MomoBird_AdminPage
             $title = (string) $row['title'] !== '' ? (string) $row['title'] : '#' . $tid;
             $titleHtml = self::h($title);
             if ($forumUrl !== '') {
-                $titleHtml = '<a href="' . self::h(MomoBird_ThreadUrl::build($forumUrl, $tid, null)) . '" target="_blank">' . $titleHtml . '</a>';
+                $titleHtml = '<a href="' . self::h(MomoBird_ThreadUrl::build($forumUrl, $tid, null)) . '" target="_blank" rel="noopener noreferrer">' . $titleHtml . '</a>';
             }
             $html .= '<tr class="hover"><td>' . $titleHtml . '</td>'
                 . '<td>' . self::h($states[(string) $row['state']] ?? (string) $row['state']) . '</td>'

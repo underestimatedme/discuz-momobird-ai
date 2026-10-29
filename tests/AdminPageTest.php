@@ -76,12 +76,19 @@ function mb_ap_get(stdClass $w): string
     return $out['body'];
 }
 
-/** POST the settings form; $fields are merged over a complete valid form. */
+/**
+ * POST the settings form; $fields are merged over a complete valid form. 'key' stands for the
+ * key input, which is named admin_password (see the admin log test).
+ */
 function mb_ap_save(stdClass $w, array $fields = array(), array $extra = array()): string
 {
+    if (array_key_exists('key', $fields)) {
+        $fields['admin_password'] = $fields['key'];
+        unset($fields['key']);
+    }
     $form = $fields + array(
         'baseUrl' => 'https://api.valley.atlaspaces.com',
-        'key' => '',
+        'admin_password' => '',
         'timeout' => '10',
         'forumUrl' => 'https://bbs.example.com/',
         'forumScope' => 'all',
@@ -123,7 +130,7 @@ mb_test('admin page: the html never contains the key, only its prefix', function
     $html = mb_ap_get($w);
     mb_ap_no_key($html, 'page');
     mb_assert(strpos($html, '已保存：mbk_DISC…') !== false, 'saved prefix shown');
-    mb_assert(preg_match('/<input[^>]*name="mb\[key\]"[^>]*>/', $html, $m) === 1, 'key input present');
+    mb_assert(preg_match('/<input[^>]*name="mb\[admin_password\]"[^>]*>/', $html, $m) === 1, 'key input present');
     mb_assert(strpos($m[0], 'value=""') !== false, 'key input is always empty: ' . $m[0]);
     mb_assert(strpos($m[0], 'type="password"') !== false, 'key input is a password field');
 
@@ -251,7 +258,7 @@ mb_test('admin page: a save without the right formhash is refused', function () 
     $w = mb_ap();
     $before = $w->store->kv;
     foreach (array(array(), array('formhash' => ''), array('formhash' => 'deadbeef')) as $extra) {
-        $request = array('momobird_save' => '1', 'mb' => array('timeout' => '20', 'key' => MB_AP_NEW_KEY)) + $extra;
+        $request = array('momobird_save' => '1', 'mb' => array('timeout' => '20', 'admin_password' => MB_AP_NEW_KEY)) + $extra;
         $out = $w->page->handle('POST', $request);
         mb_assert(strpos($out['body'], '页面已过期') !== false, 'refusal shown for ' . json_encode($extra));
     }
@@ -517,6 +524,95 @@ mb_test('admin page: the forum select lists forums and subs grouped, with hidden
     mb_assert(preg_match('/name="mb\[forumScope\]" value="selected" checked/', $html) === 1, 'scope radio reflects the selection');
 });
 
+// ---------------------------------------------------------------- admin log
+
+/** Discuz!'s writecplog(): implodearray() over GET and POST with its skip list (X3.5 and X5). */
+function mb_ap_cplog(array $get, array $post): string
+{
+    $implode = function ($array, $skip) use (&$implode) {
+        $return = '';
+        foreach ($array as $key => $value) {
+            if (!in_array($key, $skip, true)) {
+                if (is_array($value)) {
+                    $return .= "$key={" . $implode($value, $skip) . '}; ';
+                } elseif (!empty($value)) {
+                    $return .= "$key=$value; ";
+                }
+            }
+        }
+        return $return;
+    };
+    return $implode(array('GET' => $get, 'POST' => $post), array('formhash', 'submit', 'addsubmit', 'admin_password', 'sid', 'action'));
+}
+
+mb_test('admin page: the key never reaches Discuz!\'s admin log', function () {
+    $w = mb_ap(array(), false);
+    $html = mb_ap_get($w);
+    // Fill every field of the rendered form; the password field gets the key.
+    preg_match_all('/<(?:input|select)[^>]*name="(mb\[[^"]+\])"[^>]*>/', $html, $m, PREG_SET_ORDER);
+    $post = array('formhash' => MB_AP_HASH, 'momobird_save' => '1');
+    $keyFields = 0;
+    foreach ($m as $field) {
+        $value = strpos($field[0], 'type="password"') !== false ? MB_AP_NEW_KEY : 'x';
+        $keyFields += $value === MB_AP_NEW_KEY ? 1 : 0;
+        parse_str(rawurlencode($field[1]) . '=' . rawurlencode($value), $one);
+        $post = array_replace_recursive($post, $one);
+    }
+    mb_assert_same(1, $keyFields, 'one key field');
+    $get = array('action' => 'plugins', 'operation' => 'config', 'identifier' => 'momobird_ai', 'pmod' => 'admincp') + $post;
+    $log = mb_ap_cplog($get, $post);
+    mb_assert(strpos($log, 'MomoBird') === false && strpos($log, 'mbk_') === false, 'key in the admin log: ' . $log);
+    mb_assert(strpos($log, 'momobird_save') !== false, 'the log itself works');
+
+    // And that field is the one the page saves.
+    $out = $w->page->handle('POST', $get);
+    mb_assert(strpos($out['body'], '设置已保存') !== false || strpos($out['body'], '设置没有保存') !== false, 'handled');
+    $w2 = mb_ap(array(), false);
+    mb_ap_save($w2, array('admin_password' => MB_AP_NEW_KEY));
+    mb_assert_same(array('key' => MB_AP_NEW_KEY), $w2->store->get('secret'), 'saved from admin_password');
+    // A key sent under any other name is ignored, so no logged field ever carries one.
+    $w3 = mb_ap(array(), false);
+    $w3->page->handle('POST', array('formhash' => MB_AP_HASH, 'momobird_save' => '1', 'mb' => array('key' => MB_AP_NEW_KEY)));
+    mb_assert_same(null, $w3->store->get('secret'), 'mb[key] is not read');
+});
+
+mb_test('admin page: actions get time before the engine runs, refusals do not', function () {
+    $w = mb_ap(array('beforeRun' => function () use (&$w) {
+        $w->prepared[] = $w->engineBuilt;
+    }));
+    $w->prepared = array();
+    mb_ap_build($w);
+    foreach (array('test', 'sync_batch', 'retry', 'confirm_withdraw') as $action) {
+        mb_ap_ajax($w, $action);
+    }
+    mb_assert_same(4, count($w->prepared), 'once per action');
+    mb_assert_same(0, $w->prepared[0], 'before the engine is built');
+    $w->page->handle('POST', array('mb_action' => 'sync_batch', 'inajax' => '1'));
+    mb_assert_same(4, count($w->prepared), 'not for a refused action');
+    mb_ap_save($w, array('key' => MB_AP_NEW_KEY));
+    mb_assert_same(5, count($w->prepared), 'also before the status check after a new key');
+});
+
+mb_test('admin page: a selected forum that guests cannot read stays selected', function () {
+    $w = mb_ap();
+    mb_ap_save($w, array('forumScope' => 'selected', 'forumIds' => array('2', '3')));
+    $w->forum->fields[3]['password'] = 'secret';
+    $html = mb_ap_get($w);
+    mb_assert(preg_match('/<option value="3" disabled[^>]*>/', $html) === 1, 'shown disabled');
+    mb_assert(strpos($html, '<input type="hidden" name="mb[forumIds][]" value="3" />') !== false, 'kept by a hidden field');
+    mb_assert(strpos($html, 'name="mb[forumIds][]" value="2"') === false, 'no hidden field for a selectable forum');
+    // An unrelated save that submits what the browser sends keeps forum 3.
+    mb_ap_save($w, array('forumScope' => 'selected', 'forumIds' => array('2', '3'), 'timeout' => '12'));
+    mb_assert_same(array(2, 3), $w->store->get('settings')['forumIds'], 'forum 3 kept');
+});
+
+mb_test('admin page: thread links in the failure list open safely', function () {
+    $w = mb_ap();
+    $w->store->rows[8] = array_merge(MomoBird_FakeStore::COLUMNS, array('tid' => 8, 'state' => 'failed', 'title' => 't', 'updated_at' => 5));
+    mb_ap_build($w);
+    mb_assert(strpos(mb_ap_get($w), 'target="_blank" rel="noopener noreferrer"') !== false, 'rel noopener');
+});
+
 // ---------------------------------------------------------------- charset
 
 mb_test('admin page: a non-utf-8 site only sees the unsupported notice', function () {
@@ -524,7 +620,7 @@ mb_test('admin page: a non-utf-8 site only sees the unsupported notice', functio
     $out = $w->page->handle('GET', array());
     mb_assert_same('html', $out['type'], 'html');
     mb_assert(strpos($out['body'], '本插件只支持 UTF-8 编码的论坛') !== false, 'notice');
-    foreach (array('<form', 'mb[key]', 'data-mb-action', '连接状态', 'admin.js') as $text) {
+    foreach (array('<form', 'mb[admin_password]', 'data-mb-action', '连接状态', 'admin.js') as $text) {
         mb_assert(strpos($out['body'], $text) === false, 'no ' . $text);
     }
     $out = $w->page->handle('POST', array('momobird_save' => '1', 'formhash' => MB_AP_HASH, 'mb' => array('timeout' => '20')));

@@ -284,15 +284,9 @@ final class MomoBird_Bootstrap
 
     private static function run(string $kind): void
     {
-        if (function_exists('ignore_user_abort')) {
-            @ignore_user_abort(true);
-        }
+        self::allowRun();
         try {
             $engine = self::engine();
-            // Room for the deadline plus one request that started just before it.
-            if (function_exists('set_time_limit')) {
-                @set_time_limit(self::RUN_SECONDS + self::settings()->timeout() + 30);
-            }
             $deadline = time() + self::RUN_SECONDS;
             if ($kind === 'cron') {
                 $engine->cronTick($deadline);
@@ -302,6 +296,28 @@ final class MomoBird_Bootstrap
         } catch (Throwable $e) {
             // The engine records its own errors; anything else waits for the next tick.
         }
+    }
+
+    /**
+     * Before a run that may reach MomoBird (hook drain, cron tick, admin action): keep going if
+     * the visitor leaves, and room for the 20 s engine budget plus one request that started just
+     * before its deadline (PHP's default max_execution_time is 30 s).
+     */
+    public static function allowRun(): void
+    {
+        if (function_exists('ignore_user_abort')) {
+            @ignore_user_abort(true);
+        }
+        if (!function_exists('set_time_limit')) {
+            return;
+        }
+        try {
+            $timeout = self::settings()->timeout();
+        } catch (Throwable $e) {
+            $timeout = MomoBird_Settings::MAX_TIMEOUT;
+        }
+        $timeout = max(MomoBird_Settings::MIN_TIMEOUT, min(MomoBird_Settings::MAX_TIMEOUT, $timeout));
+        @set_time_limit(max(self::RUN_SECONDS, MomoBird_SyncEngine::FULL_BATCH_SECONDS) + $timeout + 30);
     }
 
     /**
@@ -327,6 +343,7 @@ final class MomoBird_Bootstrap
                 'siteUrl' => self::siteUrl(),
                 'httpHosts' => self::httpHosts(),
                 'formatTime' => $formatTime,
+                'beforeRun' => array(__CLASS__, 'allowRun'),
             )
         );
     }

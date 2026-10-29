@@ -18,6 +18,8 @@
   var running = false;
   var BUSY_WAIT_MS = 3000;
   var BUSY_TRIES = 40;
+  // Longer than any server run: 20 s engine budget + a 30 s request + slack.
+  var REQUEST_TIMEOUT_MS = 120000;
   var LEAVE_TEXT = '全量同步还在进行，离开页面会中断（定时任务之后会接着补）。';
 
   function setMessage(text, kind) {
@@ -45,11 +47,17 @@
       }
     }
     var xhr = new XMLHttpRequest();
+    var answered = false;
+    function answer(payload) {
+      if (answered) return;
+      answered = true;
+      done(payload);
+    }
     xhr.open('POST', url, true);
     xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
     xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-    xhr.onreadystatechange = function () {
-      if (xhr.readyState !== 4) return;
+    xhr.timeout = REQUEST_TIMEOUT_MS;
+    xhr.onload = function () {
       var payload = null;
       try {
         payload = JSON.parse(xhr.responseText);
@@ -57,10 +65,16 @@
         payload = null;
       }
       if (!payload || typeof payload !== 'object') {
-        done({ok: false, message: '请求失败（HTTP ' + xhr.status + '），请刷新页面后重试。'});
+        answer({ok: false, message: '请求失败（HTTP ' + xhr.status + '），请刷新页面后重试。'});
         return;
       }
-      done(payload);
+      answer(payload);
+    };
+    xhr.onerror = function () {
+      answer({ok: false, message: '连不上论坛服务器，请检查网络后刷新页面。'});
+    };
+    xhr.ontimeout = function () {
+      answer({ok: false, message: '请求超时，请刷新页面看看同步状态。'});
     };
     xhr.send(body);
   }
@@ -112,6 +126,11 @@
         if (payload.done) {
           var problems = totals.failed + totals.rejected + totals.held > 0;
           finish((payload.message || '全量同步完成。') + summary(totals) + '。', problems ? 'error' : 'success', payload);
+          return;
+        }
+        if (typeof payload.cursor !== 'string' || payload.cursor === '') {
+          // Only a busy answer may come back without a cursor; anything else would restart the sync.
+          finish(summary(totals) + '。同步进度丢失，请重新点「立即全量同步」。', 'error', payload);
           return;
         }
         cursor = payload.cursor;
