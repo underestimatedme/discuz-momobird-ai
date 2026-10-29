@@ -16,7 +16,8 @@
  *   content_changed_at  INT          when the title or text last changed (0 = never seen changing)
  *   updated_at          INT          last time the engine wrote the row
  *   queued_at           INT NULL     set while the thread waits to be processed
- *   KEY (queued_at), KEY (state)
+ *   priority            TINYINT      1 = queued by a forum settings change: processed first
+ *   KEY (priority, queued_at), KEY (state)
  *
  * pre_momobird_ai_kv:
  *   k VARCHAR(64) PRIMARY KEY, v MEDIUMTEXT (JSON)
@@ -27,7 +28,10 @@
  *   failed    network/5xx failure (push or withdraw); retried hourly, at most 5 times
  *   rejected  MomoBird refused this payload (last_error = its code); retried by hand or on change
  *   held      eligible but pushing is blocked (plan expired, address mismatch); requeued when it opens
- *   orphan    MomoBird holds it but the forum should not: waits for the cleanup guard
+ *   orphan    MomoBird holds it but the forum should not (MomoBird-only id, or a thread hidden
+ *             only by the plugin's forum selection): waits for the cleanup guard
+ *
+ * Locks: lock()/unlock() give one engine run at a time (the adapter uses discuz_process).
  */
 interface MomoBird_Store
 {
@@ -37,18 +41,26 @@ interface MomoBird_Store
     /** Insert or update a row. Writes every column except queued_at (a new row gets NULL). */
     public function savePost(array $row): void;
 
+    /**
+     * Delete rows. A row that was queued again meanwhile (queued_at set) is kept instead and
+     * reset to state=pending, remote=0, content_hash='', so the hook's event is not lost.
+     */
     public function deletePosts(array $tids): void;
 
     /**
      * Mark threads as waiting. queued_at is set only where it is NULL (the oldest wait wins).
      * Missing rows are inserted as state=pending, remote=0, unless $existingOnly.
+     * $priority sets priority=1 (also on rows already queued).
      */
-    public function enqueue(array $tids, int $now, bool $existingOnly): void;
+    public function enqueue(array $tids, int $now, bool $existingOnly, bool $priority = false): void;
 
-    /** Clear queued_at (called before a thread is read, so a hook firing meanwhile requeues it). */
+    /**
+     * Clear queued_at and priority (called before a thread is read, so a hook firing meanwhile
+     * requeues it).
+     */
     public function dequeue(array $tids): void;
 
-    /** @return int[] queued tids, highest first */
+    /** @return int[] queued tids, priority rows first, then highest tid first */
     public function queued(int $limit): array;
 
     public function countQueued(): int;
@@ -87,4 +99,12 @@ interface MomoBird_Store
 
     /** Store a kv value; null deletes the key. */
     public function set(string $key, ?array $value): void;
+
+    /**
+     * Take a named lock without waiting. False when another process holds it and it has not
+     * expired; a lock not released within $ttl seconds expires (a crashed run).
+     */
+    public function lock(string $name, int $ttl): bool;
+
+    public function unlock(string $name): void;
 }

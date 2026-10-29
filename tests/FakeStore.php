@@ -7,10 +7,14 @@ class MomoBird_FakeStore implements MomoBird_Store
     public $rows = array();
     /** @var array<string, array> */
     public $kv = array();
+    /** @var array<string, bool> held locks (tests set one to simulate another process) */
+    public $locks = array();
+    /** @var array<string, int> last ttl asked for per lock */
+    public $lockTtls = array();
 
     const COLUMNS = array(
         'tid' => 0, 'state' => 'pending', 'content_hash' => '', 'body_hash' => '', 'category' => '', 'title' => '',
-        'attempts' => 0, 'last_error' => '', 'remote' => 0, 'content_changed_at' => 0, 'updated_at' => 0, 'queued_at' => null,
+        'attempts' => 0, 'last_error' => '', 'remote' => 0, 'content_changed_at' => 0, 'updated_at' => 0, 'queued_at' => null, 'priority' => 0,
     );
 
     public function posts(array $tids): array
@@ -34,17 +38,25 @@ class MomoBird_FakeStore implements MomoBird_Store
         }
         $clean['tid'] = $tid;
         $clean['queued_at'] = $queued;
+        $clean['priority'] = isset($this->rows[$tid]) ? $this->rows[$tid]['priority'] : 0;
         $this->rows[$tid] = $clean;
     }
 
     public function deletePosts(array $tids): void
     {
         foreach ($tids as $tid) {
-            unset($this->rows[(int) $tid]);
+            $tid = (int) $tid;
+            if (isset($this->rows[$tid]) && $this->rows[$tid]['queued_at'] !== null) {
+                $this->rows[$tid]['state'] = 'pending';
+                $this->rows[$tid]['remote'] = 0;
+                $this->rows[$tid]['content_hash'] = '';
+                continue;
+            }
+            unset($this->rows[$tid]);
         }
     }
 
-    public function enqueue(array $tids, int $now, bool $existingOnly): void
+    public function enqueue(array $tids, int $now, bool $existingOnly, bool $priority = false): void
     {
         foreach ($tids as $tid) {
             $tid = (int) $tid;
@@ -57,6 +69,9 @@ class MomoBird_FakeStore implements MomoBird_Store
             if ($this->rows[$tid]['queued_at'] === null) {
                 $this->rows[$tid]['queued_at'] = $now;
             }
+            if ($priority) {
+                $this->rows[$tid]['priority'] = 1;
+            }
         }
     }
 
@@ -65,6 +80,7 @@ class MomoBird_FakeStore implements MomoBird_Store
         foreach ($tids as $tid) {
             if (isset($this->rows[(int) $tid])) {
                 $this->rows[(int) $tid]['queued_at'] = null;
+                $this->rows[(int) $tid]['priority'] = 0;
             }
         }
     }
@@ -77,7 +93,10 @@ class MomoBird_FakeStore implements MomoBird_Store
                 $tids[] = $tid;
             }
         }
-        rsort($tids);
+        $rows = $this->rows;
+        usort($tids, function ($a, $b) use ($rows) {
+            return $rows[$b]['priority'] <=> $rows[$a]['priority'] ?: $b <=> $a;
+        });
         return array_slice($tids, 0, $limit);
     }
 
@@ -186,6 +205,21 @@ class MomoBird_FakeStore implements MomoBird_Store
             // Round-trip through JSON like the real table does.
             $this->kv[$key] = json_decode(json_encode($value), true);
         }
+    }
+
+    public function lock(string $name, int $ttl): bool
+    {
+        $this->lockTtls[$name] = $ttl;
+        if (!empty($this->locks[$name])) {
+            return false;
+        }
+        $this->locks[$name] = true;
+        return true;
+    }
+
+    public function unlock(string $name): void
+    {
+        unset($this->locks[$name]);
     }
 
     /** Test helper: state of one thread, or null when it has no row. */

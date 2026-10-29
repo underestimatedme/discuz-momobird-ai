@@ -43,6 +43,11 @@ final class MomoBird_SyncEngine
     const FULL_BATCH_SECONDS = 20;
 
     const PLAN_MESSAGE = '套餐已到期，已停止推送，撤下照常；续费后点「立即全量同步」或等下一次对账补齐';
+    const BUSY_MESSAGE = '正在同步，请稍后再试';
+    const READ_MESSAGE = '读取论坛数据失败';
+    const LOCK = 'sync';
+    /** Queued threads read per drain step: withdrawals go up to 100 per request. */
+    const DRAIN_BATCH = 100;
     const SITE_MESSAGE = '论坛已关闭或游客不能访问论坛，暂停同步（不推送也不撤下）';
 
     private $settings;
@@ -76,31 +81,56 @@ final class MomoBird_SyncEngine
         }
     }
 
-    /** Process queued threads, newest first, until the queue is empty or the deadline. */
+    /**
+     * Process queued threads (forum-settings requeues first, then newest first) until the
+     * queue is empty or the deadline. Returns at once when another run holds the lock: the
+     * queue stays for the cron job.
+     */
     public function drain(int $deadline): MomoBird_SyncResult
     {
         $run = $this->begin('drain');
-        if ($this->ready($run)) {
-            $ctx = $this->siteContext($run);
-            if ($ctx !== null) {
-                $this->drainQueue($run, $ctx, $deadline);
-                // While a reconcile is listing, the orphan set is incomplete: the guard waits for it.
-                if ($this->store->get('reconcile') === null) {
-                    $this->settleOrphans($run, $deadline, false, null, null);
-                }
-            }
+        if ($this->store->countQueued() === 0) {
+            return $run;
         }
-        return $this->finish($run);
+        $locked = $this->guarded($run, $this->lockTtl($deadline), function () use ($run, $deadline) {
+            if (!$this->ready($run)) {
+                return;
+            }
+            $ctx = $this->siteContext($run);
+            if ($ctx === null) {
+                return;
+            }
+            $this->drainQueue($run, $ctx, $deadline);
+            // While a reconcile is listing, the orphan set is incomplete: the guard waits for it.
+            if ($this->store->get('reconcile') === null) {
+                $this->settleOrphans($run, $deadline, false, null, null);
+            }
+        });
+        if (!$locked) {
+            $run->note(self::BUSY_MESSAGE);
+        }
+        return $run;
     }
 
-    /** The 5-minute cron job. */
+    /** The 5-minute cron job. Skips the tick when another run holds the lock. */
     public function cronTick(int $deadline): MomoBird_SyncResult
     {
         $run = $this->begin('cron');
+        $locked = $this->guarded($run, $this->lockTtl($deadline), function () use ($run, $deadline) {
+            $this->tick($run, $deadline);
+        });
+        if (!$locked) {
+            $run->note(self::BUSY_MESSAGE);
+        }
+        return $run;
+    }
+
+    private function tick(MomoBird_SyncResult $run, int $deadline): void
+    {
         $problems = $this->settings->validate();
         if ($problems) {
             $run->fail('设置不完整，没有同步：' . implode(' ', $problems));
-            return $this->finish($run);
+            return;
         }
 
         // First, so a renewed plan, a new key or a fixed address takes effect in this tick.
@@ -110,11 +140,11 @@ final class MomoBird_SyncEngine
             $refreshed = true;
         }
         if (!$this->ready($run)) {
-            return $this->finish($run);
+            return;
         }
         $ctx = $this->siteContext($run);
         if ($ctx === null) {
-            return $this->finish($run);
+            return;
         }
 
         $this->fingerprint($run, $ctx);
@@ -137,43 +167,58 @@ final class MomoBird_SyncEngine
             $this->settleOrphans($run, $deadline, false, null, null);
         }
         $this->maybeEnableWidget($run);
-        return $this->finish($run);
     }
 
     /**
      * One step of the admin page's full sync. Pass null to start, then the returned cursor
      * until done. Each step pushes at most 20 threads (newest first); the last steps list
      * MomoBird's posts and take down what the forum no longer has, behind the cleanup guard.
+     * When another run holds the lock: done=false, busy=true, the same cursor, and the
+     * result's error 「正在同步，请稍后再试」.
      *
-     * @return array{done: bool, cursor: ?string, result: MomoBird_SyncResult}
+     * @return array{done: bool, cursor: ?string, result: MomoBird_SyncResult, busy?: bool}
      */
     public function fullSyncBatch(?string $cursor): array
     {
         $run = $this->begin('full');
         $deadline = $this->now() + self::FULL_BATCH_SECONDS;
-        $stop = array('done' => true, 'cursor' => null, 'result' => null);
+        $out = null;
+        $locked = $this->guarded($run, $this->lockTtl($deadline), function () use ($run, $cursor, $deadline, &$out) {
+            $out = $this->fullSyncStep($run, $cursor, $deadline);
+        });
+        if (!$locked) {
+            $run->fail(self::BUSY_MESSAGE);
+            return array('done' => false, 'cursor' => $cursor, 'busy' => true, 'result' => $run);
+        }
+        if ($out === null) {
+            // The forum could not be read: stop the page; nothing was changed.
+            $out = array('done' => true, 'cursor' => null);
+        }
+        $out['result'] = $run;
+        return $out;
+    }
 
+    /** @return array{done: bool, cursor: ?string} */
+    private function fullSyncStep(MomoBird_SyncResult $run, ?string $cursor, int $deadline): array
+    {
+        $stop = array('done' => true, 'cursor' => null);
         if (!$this->ready($run)) {
-            $stop['result'] = $this->finish($run);
             return $stop;
         }
         $ctx = $this->siteContext($run);
         if ($ctx === null) {
             $run->fail(self::SITE_MESSAGE);
-            $stop['result'] = $this->finish($run);
             return $stop;
         }
 
         if ($cursor === null) {
             if (!$this->refreshStatusCache($run)) {
                 $run->fail($run->error !== null ? $run->error : '无法读取 MomoBird 的连接状态，没有开始同步');
-                $stop['result'] = $this->finish($run);
                 return $stop;
             }
             $this->gate = null;
             if ($this->pushGate($run, $deadline) === 'ORIGIN_MISMATCH') {
                 $run->fail($this->originMessage());
-                $stop['result'] = $this->finish($run);
                 return $stop;
             }
             $previous = $this->store->get('full_sync');
@@ -189,11 +234,10 @@ final class MomoBird_SyncEngine
             $below = substr($cursor, 2) === '' ? null : (int) substr($cursor, 2);
             $next = $this->fullThreads($run, $ctx, $below, $deadline);
             if ($this->stopped($run)) {
-                $stop['result'] = $this->finish($run);
                 return $stop;
             }
             if ($next !== null) {
-                return array('done' => false, 'cursor' => 't:' . $next, 'result' => $this->finish($run));
+                return array('done' => false, 'cursor' => 't:' . $next);
             }
             $full = $this->store->get('full_sync');
             $this->finishRound((int) ($full['eligible'] ?? 0), (int) ($full['started_at'] ?? $this->now()));
@@ -202,7 +246,6 @@ final class MomoBird_SyncEngine
 
         if ($cursor !== 'r') {
             $run->fail('同步进度无法识别，请重新点「立即全量同步」');
-            $stop['result'] = $this->finish($run);
             return $stop;
         }
 
@@ -210,10 +253,9 @@ final class MomoBird_SyncEngine
         if ($this->store->get('reconcile') !== null) {
             if ($run->error !== null || $this->stopped($run)) {
                 // The cron job picks the listing up again; the page stops here.
-                $stop['result'] = $this->finish($run);
                 return $stop;
             }
-            return array('done' => false, 'cursor' => 'r', 'result' => $this->finish($run));
+            return array('done' => false, 'cursor' => 'r');
         }
 
         if ($run->error === null && $run->halted === null) {
@@ -223,7 +265,6 @@ final class MomoBird_SyncEngine
             $this->refreshStatusCache($run);
             $this->maybeEnableWidget($run);
         }
-        $stop['result'] = $this->finish($run);
         return $stop;
     }
 
@@ -231,31 +272,43 @@ final class MomoBird_SyncEngine
     public function confirmWithdraw(): MomoBird_SyncResult
     {
         $run = $this->begin('confirm');
-        if ($this->ready($run) && $this->siteContext($run) !== null) {
-            $guard = $this->store->get('guard');
-            $guard = is_array($guard) ? $guard : array();
-            $guard['confirmed'] = true;
-            $this->store->set('guard', $guard);
-            $this->settleOrphans($run, $this->now() + self::FULL_BATCH_SECONDS, true, null, null);
+        $deadline = $this->now() + self::FULL_BATCH_SECONDS;
+        $locked = $this->guarded($run, $this->lockTtl($deadline), function () use ($run, $deadline) {
+            if ($this->ready($run) && $this->siteContext($run) !== null) {
+                $guard = $this->store->get('guard');
+                $guard = is_array($guard) ? $guard : array();
+                $guard['confirmed'] = true;
+                $this->store->set('guard', $guard);
+                $this->settleOrphans($run, $deadline, true, null, null);
+            }
+        });
+        if (!$locked) {
+            $run->fail(self::BUSY_MESSAGE);
         }
-        return $this->finish($run);
+        return $run;
     }
 
     /** The admin's 「重试失败项」: every failed, rejected and held thread is tried again now. */
     public function retryFailed(): MomoBird_SyncResult
     {
         $run = $this->begin('retry');
-        if ($this->ready($run)) {
+        $deadline = $this->now() + self::FULL_BATCH_SECONDS;
+        $locked = $this->guarded($run, $this->lockTtl($deadline), function () use ($run, $deadline) {
+            if (!$this->ready($run)) {
+                return;
+            }
             $ctx = $this->siteContext($run);
             if ($ctx !== null) {
-                $now = $this->now();
                 foreach (array('failed', 'rejected', 'held') as $state) {
-                    $this->store->enqueueState($state, $now);
+                    $this->store->enqueueState($state, $this->now());
                 }
-                $this->drainQueue($run, $ctx, $now + self::FULL_BATCH_SECONDS);
+                $this->drainQueue($run, $ctx, $deadline);
             }
+        });
+        if (!$locked) {
+            $run->fail(self::BUSY_MESSAGE);
         }
-        return $this->finish($run);
+        return $run;
     }
 
     /** The admin's 「测试连接」: fetch the connect status now and cache it. */
@@ -279,8 +332,18 @@ final class MomoBird_SyncEngine
         $plan = $this->store->get('plan');
         $reconcile = $this->store->get('last_reconcile');
 
-        $ctx = $this->context();
-        if (!empty($scan['round_finished_at'])) {
+        $readError = $this->store->get('read_error');
+        try {
+            $ctx = $this->context();
+        } catch (MomoBird_ForumReadError $e) {
+            $ctx = null;
+            if ($readError === null) {
+                $readError = array('at' => $this->now(), 'message' => $e->getMessage());
+            }
+        }
+        if ($ctx === null) {
+            $local = array('count' => null, 'exact' => false);
+        } elseif (!empty($scan['round_finished_at'])) {
             $local = array('count' => (int) ($scan['eligible'] ?? 0), 'exact' => true);
         } else {
             $fids = array();
@@ -290,7 +353,12 @@ final class MomoBird_SyncEngine
                 }
             }
             $readaccess = isset($ctx['guest']['readaccess']) && is_numeric($ctx['guest']['readaccess']) ? (int) $ctx['guest']['readaccess'] : 0;
-            $local = array('count' => $fids ? $this->source->countCandidates($fids, $readaccess) : 0, 'exact' => false);
+            try {
+                $count = $fids ? (int) $this->src('countCandidates', array($fids, $readaccess)) : 0;
+            } catch (MomoBird_ForumReadError $e) {
+                $count = null;
+            }
+            $local = array('count' => $count, 'exact' => false);
         }
 
         $kind = isset($source['kind']) && is_string($source['kind']) ? $source['kind'] : null;
@@ -312,7 +380,8 @@ final class MomoBird_SyncEngine
         $planActive = isset($cached['entitlement']['active']) ? $cached['entitlement']['active'] : null;
         return array(
             'settings_problems' => $this->settings->validate(),
-            'site' => $ctx['site'],
+            'site' => $ctx === null ? null : $ctx['site'],
+            'read_error' => $readError,
             'connect' => is_array($cached) ? $cached : null,
             'source' => array(
                 'kind' => $kind,
@@ -353,6 +422,52 @@ final class MomoBird_SyncEngine
     }
 
     // ================================================================ run plumbing
+
+    /**
+     * Run $body holding the engine lock, record the run, release the lock. A forum read
+     * failure inside ends the run with nothing changed. Returns false when the lock is held.
+     */
+    private function guarded(MomoBird_SyncResult $run, int $ttl, callable $body): bool
+    {
+        if (!$this->store->lock(self::LOCK, $ttl)) {
+            return false;
+        }
+        try {
+            try {
+                $body();
+            } catch (MomoBird_ForumReadError $e) {
+                $this->readFailed($run, $e);
+            }
+            $this->finish($run);
+        } finally {
+            $this->store->unlock(self::LOCK);
+        }
+        return true;
+    }
+
+    /** Long enough for the work up to the deadline plus one request that starts just before it. */
+    private function lockTtl(int $deadline): int
+    {
+        return max(1, $deadline - $this->now()) + $this->settings->timeout() + 10;
+    }
+
+    private function readFailed(MomoBird_SyncResult $run, MomoBird_ForumReadError $e): void
+    {
+        $this->store->set('read_error', array('at' => $this->now(), 'message' => $e->getMessage()));
+        $run->fail($e->getMessage());
+    }
+
+    /** Call the forum source; any failure becomes a MomoBird_ForumReadError. */
+    private function src(string $method, array $args = array())
+    {
+        try {
+            return call_user_func_array(array($this->source, $method), $args);
+        } catch (MomoBird_ForumReadError $e) {
+            throw $e;
+        } catch (Throwable $e) {
+            throw new MomoBird_ForumReadError(self::READ_MESSAGE . '：' . self::truncate(MomoBird_Redactor::clean($e->getMessage(), $this->settings->key()), 200));
+        }
+    }
 
     private function begin(string $mode): MomoBird_SyncResult
     {
@@ -407,6 +522,9 @@ final class MomoBird_SyncEngine
     private function siteContext(MomoBird_SyncResult $run): ?array
     {
         $ctx = $this->context();
+        if ($this->store->get('read_error') !== null) {
+            $this->store->set('read_error', null);
+        }
         if ($ctx['site'] !== null) {
             $run->siteClosed = true;
             $run->note(self::SITE_MESSAGE);
@@ -415,22 +533,41 @@ final class MomoBird_SyncEngine
         return $ctx;
     }
 
+    /**
+     * The forum tree, guest group and settings. A read that cannot be right (exception, no
+     * forum at all, no guest group, no settings) throws MomoBird_ForumReadError.
+     */
     private function context(): array
     {
-        $setting = $this->source->setting();
-        $guest = $this->source->guestGroup();
+        $setting = $this->src('setting');
+        $guest = $this->src('guestGroup');
+        if (!is_array($setting) || !$setting) {
+            throw new MomoBird_ForumReadError(self::READ_MESSAGE . '：没有读到论坛设置');
+        }
+        if (!is_array($guest) || !$guest) {
+            throw new MomoBird_ForumReadError(self::READ_MESSAGE . '：没有读到游客用户组');
+        }
         $forums = array();
-        foreach ($this->source->forums() as $row) {
+        $postable = 0;
+        foreach ((array) $this->src('forums') as $row) {
             if (is_array($row) && isset($row['fid'])) {
                 $forums[(int) $row['fid']] = $row;
+                $type = isset($row['type']) ? (string) $row['type'] : '';
+                $postable += $type === 'forum' || $type === 'sub' ? 1 : 0;
             }
         }
-        $fields = $this->source->forumFields();
+        if ($postable === 0) {
+            throw new MomoBird_ForumReadError(self::READ_MESSAGE . '：没有读到任何版块');
+        }
+        $fields = (array) $this->src('forumFields');
         $selected = $this->settings->forumIds();
         $reasons = array();
+        $open = array();
         foreach ($forums as $fid => $row) {
             $field = isset($fields[$fid]) && is_array($fields[$fid]) ? $fields[$fid] : array();
             $reasons[$fid] = MomoBird_Visibility::forum($row, $field, $guest, $selected);
+            // The same check with the plugin's forum selection ignored.
+            $open[$fid] = MomoBird_Visibility::forum($row, $field, $guest, null);
         }
         return array(
             'site' => MomoBird_Visibility::site($guest, $setting),
@@ -438,8 +575,9 @@ final class MomoBird_SyncEngine
             'guest' => $guest,
             'forums' => $forums,
             'reasons' => $reasons,
+            'open' => $open,
             'categories' => MomoBird_Categories::build(array_values($forums)),
-            'rewrite' => $this->source->rewriteRule(),
+            'rewrite' => $this->src('rewriteRule'),
         );
     }
 
@@ -447,21 +585,31 @@ final class MomoBird_SyncEngine
 
     /**
      * Thread- and forum-level checks only (no post): null when the thread may sync,
-     * otherwise the reason.
+     * otherwise the reason. Every guest-visibility reason comes before `not_selected`, so a
+     * deselected forum never hides another reason to withdraw.
      */
     private function precheck(array $ctx, array $thread): ?string
     {
         $fid = isset($thread['fid']) ? (int) $thread['fid'] : 0;
-        $reason = array_key_exists($fid, $ctx['reasons']) ? $ctx['reasons'][$fid] : 'missing_forum';
+        $reason = array_key_exists($fid, $ctx['open']) ? $ctx['open'][$fid] : 'missing_forum';
         if ($reason !== null) {
             return $reason;
         }
         $reason = MomoBird_Visibility::thread($thread, array(), $ctx['guest'], $ctx['setting']);
         // Every thread-level check passed when the only complaint is the absent post.
-        return $reason === 'missing_post' ? null : $reason;
+        if ($reason !== 'missing_post') {
+            return $reason;
+        }
+        // `??` would turn the null ("selected") into the default, hence array_key_exists.
+        return array_key_exists($fid, $ctx['reasons']) && $ctx['reasons'][$fid] === null ? null : 'not_selected';
     }
 
-    /** @return array{tid:int, eligible:bool, reason:?string, title:string, ...} */
+    /**
+     * `not_selected` means: a guest could read it and it has text, only the plugin's forum
+     * selection leaves it out (those removals go through the cleanup guard).
+     *
+     * @return array{tid:int, eligible:bool, reason:?string, title:string, ...}
+     */
     private function decide(array $ctx, int $tid, ?array $thread, ?array $post): array
     {
         if ($thread === null) {
@@ -469,7 +617,8 @@ final class MomoBird_SyncEngine
         }
         $title = isset($thread['subject']) ? self::plainTitle((string) $thread['subject']) : '';
         $reason = $this->precheck($ctx, $thread);
-        if ($reason === null) {
+        $deselected = $reason === 'not_selected';
+        if ($reason === null || $deselected) {
             $reason = MomoBird_Visibility::thread($thread, $post === null ? array() : $post, $ctx['guest'], $ctx['setting']);
         }
         if ($reason !== null) {
@@ -481,6 +630,9 @@ final class MomoBird_SyncEngine
         $payload = MomoBird_ThreadMapper::payload($thread, $post, $category, $url);
         if ($payload === null) {
             return array('tid' => $tid, 'eligible' => false, 'reason' => 'empty', 'title' => $title);
+        }
+        if ($deselected) {
+            return array('tid' => $tid, 'eligible' => false, 'reason' => 'not_selected', 'title' => $payload['title']);
         }
         return array('tid' => $tid, 'eligible' => true, 'reason' => null, 'title' => $payload['title'],
             'payload' => $payload, 'thread' => $thread, 'post' => $post, 'category' => $category, 'url' => $url);
@@ -564,19 +716,25 @@ final class MomoBird_SyncEngine
                 $run->deadlineReached = true;
                 return;
             }
-            $tids = $this->store->queued(self::PUSH_BATCH);
+            $tids = $this->store->queued(self::DRAIN_BATCH);
             if (!$tids) {
                 return;
             }
             $this->store->dequeue($tids);
-            $this->processTids($run, $ctx, $tids, $deadline);
+            try {
+                $this->processTids($run, $ctx, $tids, $deadline);
+            } catch (MomoBird_ForumReadError $e) {
+                // Read before anything was decided: put them back untouched.
+                $this->store->enqueue($tids, $this->now(), false);
+                throw $e;
+            }
         }
     }
 
     private function processTids(MomoBird_SyncResult $run, array $ctx, array $tids, int $deadline): void
     {
-        $threads = $this->source->threads($tids);
-        $posts = $threads ? $this->source->firstPosts($threads) : array();
+        $threads = (array) $this->src('threads', array($tids));
+        $posts = $threads ? $this->firstPostsOf($threads) : array();
         $rows = $this->store->posts($tids);
         $push = array();
         $withdraw = array();
@@ -587,6 +745,19 @@ final class MomoBird_SyncEngine
         // Withdrawals first: keeping hidden content out matters more than pushing.
         $this->sendWithdrawals($run, $withdraw, $deadline, false);
         $this->sendPushes($run, $push, $deadline);
+    }
+
+    /**
+     * First posts of these threads. Every thread has one, so none at all for several
+     * threads is a read failure (e.g. a post table the adapter cannot reach), not deletions.
+     */
+    private function firstPostsOf(array $threads): array
+    {
+        $posts = (array) $this->src('firstPosts', array($threads));
+        if (!$posts && count($threads) >= 2) {
+            throw new MomoBird_ForumReadError(self::READ_MESSAGE . '：' . count($threads) . ' 个主题都没有读到主帖');
+        }
+        return $posts;
     }
 
     private function requeue(array $items): void
@@ -813,7 +984,8 @@ final class MomoBird_SyncEngine
         $attempts = ($row !== null ? (int) $row['attempts'] : 0) + 1;
         $message = self::truncate($message, 200);
         if ($isPush) {
-            $this->save($item, array('state' => 'failed', 'attempts' => $attempts, 'last_error' => $message));
+            // The request's outcome is unknown: MomoBird may have stored it, so a later hide must send a delete.
+            $this->save($item, array('state' => 'failed', 'attempts' => $attempts, 'last_error' => $message, 'remote' => 1));
             return;
         }
         $row['state'] = 'failed';
@@ -1041,37 +1213,38 @@ final class MomoBird_SyncEngine
         if ($old === $now) {
             return;
         }
-        $this->store->set('fingerprint', $now);
         if ($old === null) {
+            $this->store->set('fingerprint', $now);
             return;
         }
 
         $oldForums = isset($old['forums']) && is_array($old['forums']) ? $old['forums'] : array();
+        $globalChanged = ($old['global'] ?? null) !== $global;
         $affected = array();
         foreach (array_unique(array_merge(array_keys($oldForums), array_keys($forums))) as $fid) {
             $before = array_key_exists($fid, $oldForums) ? $oldForums[$fid] : false;
             $after = array_key_exists($fid, $forums) ? $forums[$fid] : false;
-            $globalChanged = ($old['global'] ?? null) !== $global;
             if ($before !== $after || ($globalChanged && ($before !== false || $after !== false))) {
                 $affected[(int) $fid] = $after !== false;
             }
         }
-        if (!$affected) {
-            return;
-        }
-        $requeue = $this->store->get('requeue');
-        $jobs = isset($requeue['jobs']) && is_array($requeue['jobs']) ? $requeue['jobs'] : array();
-        foreach (array(true, false) as $syncing) {
-            $fids = array_keys(array_filter($affected, function ($s) use ($syncing) {
-                return $s === $syncing;
-            }));
-            if ($fids) {
-                // Forums that no longer sync only need the threads MomoBird may hold.
-                $jobs[] = array('fids' => $fids, 'existing' => !$syncing, 'below' => null);
+        if ($affected) {
+            $requeue = $this->store->get('requeue');
+            $jobs = isset($requeue['jobs']) && is_array($requeue['jobs']) ? $requeue['jobs'] : array();
+            foreach (array(true, false) as $syncing) {
+                $fids = array_keys(array_filter($affected, function ($s) use ($syncing) {
+                    return $s === $syncing;
+                }));
+                if ($fids) {
+                    // Forums that no longer sync only need the threads MomoBird may hold.
+                    $jobs[] = array('fids' => $fids, 'existing' => !$syncing, 'below' => null);
+                }
             }
+            // Jobs first: a crash between the two writes repeats the requeue instead of losing it.
+            $this->store->set('requeue', array('jobs' => $jobs));
+            $run->note('版块设置有变化，已把 ' . count($affected) . ' 个版块的主题优先排进同步队列');
         }
-        $this->store->set('requeue', array('jobs' => $jobs));
-        $run->note('版块设置有变化，已把 ' . count($affected) . ' 个版块的主题排进同步队列');
+        $this->store->set('fingerprint', $now);
     }
 
     private function runRequeue(MomoBird_SyncResult $run, int $deadline): void
@@ -1085,9 +1258,9 @@ final class MomoBird_SyncEngine
             }
             $job = $jobs[0];
             $below = isset($job['below']) ? (int) $job['below'] : null;
-            $tids = self::tids($this->source->threadIdsInForums(array_map('intval', (array) $job['fids']), $below, self::READ_ROWS));
+            $tids = self::tids((array) $this->src('threadIdsInForums', array(array_map('intval', (array) $job['fids']), $below, self::READ_ROWS)));
             if ($tids) {
-                $this->store->enqueue($tids, $this->now(), !empty($job['existing']));
+                $this->store->enqueue($tids, $this->now(), !empty($job['existing']), true);
                 $jobs[0]['below'] = min($tids);
             }
             if (count($tids) < self::READ_ROWS) {
@@ -1127,7 +1300,7 @@ final class MomoBird_SyncEngine
                 return;
             }
             $cursor = isset($scan['cursor']) ? (int) $scan['cursor'] : null;
-            $rows = $this->source->threadsBelow($cursor, self::READ_ROWS);
+            $rows = (array) $this->src('threadsBelow', array($cursor, self::READ_ROWS));
             foreach (array_chunk($rows, self::SCAN_CHUNK) as $chunk) {
                 $scan['eligible'] = (int) $scan['eligible'] + $this->scanChunk($ctx, $chunk);
                 $scan['cursor'] = min(array_map('intval', array_column($chunk, 'tid')));
@@ -1159,26 +1332,31 @@ final class MomoBird_SyncEngine
         foreach ($byTid as $tid => $thread) {
             $row = $rows[$tid] ?? null;
             $reason = $this->precheck($ctx, $thread);
-            if ($reason !== null) {
-                if ($row !== null && !($row['state'] === 'orphan' && $reason === 'not_selected')) {
+            if ($reason !== null && $reason !== 'not_selected') {
+                if ($row !== null) {
                     $queue[] = $tid;
                 }
                 continue;
             }
             if ($row === null) {
-                // New to the plugin: the drain reads the post and decides.
-                $eligible++;
-                $queue[] = $tid;
+                if ($reason === null) {
+                    // New to the plugin: the drain reads the post and decides.
+                    $eligible++;
+                    $queue[] = $tid;
+                }
                 continue;
             }
+            // Deselected threads are read too: one hidden for another reason is withdrawn at once.
             $needPost[$tid] = $thread;
         }
         if ($needPost) {
-            $posts = $this->source->firstPosts($needPost);
+            $posts = $this->firstPostsOf($needPost);
             foreach ($needPost as $tid => $thread) {
                 $d = $this->decide($ctx, $tid, $thread, $posts[$tid] ?? null);
                 if (!$d['eligible']) {
-                    $queue[] = $tid;
+                    if (!($d['reason'] === 'not_selected' && $rows[$tid]['state'] === 'orphan')) {
+                        $queue[] = $tid;
+                    }
                     continue;
                 }
                 $eligible++;
@@ -1392,7 +1570,7 @@ final class MomoBird_SyncEngine
                 $run->deadlineReached = true;
                 break;
             }
-            $rows = $this->source->threadsBelow($cursor, self::FULL_READ_ROWS);
+            $rows = (array) $this->src('threadsBelow', array($cursor, self::FULL_READ_ROWS));
             $read += count($rows);
             $consumed = 0;
             foreach (array_chunk($rows, self::PUSH_BATCH) as $chunk) {
@@ -1400,7 +1578,7 @@ final class MomoBird_SyncEngine
                 foreach ($chunk as $thread) {
                     $threads[(int) $thread['tid']] = $thread;
                 }
-                $posts = $this->source->firstPosts($threads);
+                $posts = $this->firstPostsOf($threads);
                 $stored = $this->store->posts(array_keys($threads));
                 foreach ($threads as $tid => $thread) {
                     $d = $this->decide($ctx, $tid, $thread, $posts[$tid] ?? null);

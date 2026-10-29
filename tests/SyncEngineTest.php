@@ -842,3 +842,161 @@ mb_test('orphans wait while a reconcile is still listing', function () {
     mb_assert_same(array(), $w->server->deletedIds(), 'not withdrawn from a partial listing');
     mb_assert_same('orphan', $w->store->state(500), 'still waiting');
 });
+
+// ---------------------------------------------------------------- fix round 1
+
+mb_test('a hidden thread in a deselected forum is withdrawn at once, outside the guard', function () {
+    $w = mb_se();
+    mb_se_threads($w, range(1, 15), 2);
+    mb_se_threads($w, array(21, 22), 3);
+    mb_se_full($w);
+    $w->engine->cronTick(mb_se_deadline($w));
+    mb_se_configure($w, array('forumIds' => array(3)));
+    $w->clock->now += 300;
+    $w->engine->cronTick(mb_se_deadline($w));
+    mb_assert_same('guard', $w->engine->status()['guard']['reason'], 'guard holds the deselection');
+    $w->forum->threads[7]['displayorder'] = -1;
+    $w->forum->posts[8]['message'] = '[password]x[/password]';
+    mb_se_reset_requests($w);
+    mb_se_sync($w, array(7, 8));
+    $deleted = $w->server->deletedIds();
+    sort($deleted);
+    mb_assert_same(array('7', '8'), $deleted, 'recycled and password threads withdrawn');
+    mb_assert_same('orphan', $w->store->state(6), 'merely deselected still waits');
+
+    // The daily scan finds the same thing without a hook.
+    $w->forum->threads[6]['readperm'] = 200;
+    $w->clock->now += 86400 + 1;
+    mb_se_reset_requests($w);
+    $w->engine->cronTick(mb_se_deadline($w));
+    mb_assert(in_array('6', $w->server->deletedIds(), true), 'scan withdraws the readperm thread');
+});
+
+mb_test('a push with an unknown outcome is withdrawn when the thread is hidden', function () {
+    $w = mb_se();
+    mb_se_threads($w, array(50));
+    $server = $w->server;
+    $w->engine->refreshStatus();
+    $w->server->transport->push(function ($method, $url, $headers, $body) use ($server) {
+        $server->handle($method, $url, $body);
+        return array('status' => 0, 'body' => '', 'error' => 'timed out');
+    });
+    mb_se_sync($w, array(50));
+    mb_assert_same(1, $w->store->rows[50]['remote'], 'MomoBird may hold it');
+    $w->forum->threads[50]['displayorder'] = -1;
+    mb_se_sync($w, array(50));
+    mb_assert_same(array('50'), $w->server->deletedIds(), 'delete sent');
+    mb_assert(!isset($w->server->posts['50']), 'gone');
+});
+
+mb_test('an empty forum tree aborts the tick without changing anything', function () {
+    $w = mb_se();
+    mb_se_threads($w, range(1, 30));
+    mb_se_full($w);
+    $w->engine->cronTick(mb_se_deadline($w));
+    $fingerprint = $w->store->get('fingerprint');
+    $saved = $w->forum->forums;
+    $w->forum->forums = array();
+    $w->clock->now += 300;
+    mb_se_reset_requests($w);
+    $result = $w->engine->cronTick(mb_se_deadline($w));
+    mb_assert_same(array(), $w->server->writes(), 'nothing withdrawn');
+    mb_assert_same($fingerprint, $w->store->get('fingerprint'), 'fingerprint kept');
+    mb_assert_same(null, $w->store->get('requeue'), 'nothing requeued');
+    mb_assert(strpos((string) $result->error, '读取论坛数据失败') !== false, 'run error: ' . $result->error);
+    $readError = $w->engine->status()['read_error'];
+    mb_assert(strpos($readError['message'], '读取论坛数据失败') !== false, 'status shows it');
+    mb_assert_same($w->clock->now, $readError['at'], 'with the time');
+
+    $w->forum->forums = $saved;
+    $w->clock->now += 300;
+    $w->engine->cronTick(mb_se_deadline($w));
+    mb_assert_same(array(), $w->server->writes(), 'good read afterwards: nothing to do');
+    mb_assert_same(30, count($w->server->posts), 'knowledge base intact');
+    mb_assert_same(null, $w->engine->status()['read_error'], 'cleared');
+});
+
+mb_test('a missing guest group or forum settings abort the run', function () {
+    $w = mb_se();
+    mb_se_threads($w, array(11));
+    mb_se_sync($w, array(11));
+    $w->forum->threads[11]['displayorder'] = -1;
+    $w->forum->guest = array();
+    $result = mb_se_sync($w, array(11));
+    mb_assert(strpos((string) $result->error, '读取论坛数据失败') !== false, 'guest group');
+    mb_assert_same(array(11), $w->store->queued(10), 'queue kept');
+    $w->forum->guest = array('groupid' => 7, 'readaccess' => 1, 'allowvisit' => 1);
+    $w->forum->setting = array();
+    $result = mb_se_sync($w, array(11));
+    mb_assert(strpos((string) $result->error, '读取论坛数据失败') !== false, 'settings');
+    mb_assert_same(array(), $w->server->deletedIds(), 'nothing withdrawn');
+});
+
+mb_test('a forum read exception mid-drain keeps the queue and changes nothing', function () {
+    $w = mb_se();
+    mb_se_threads($w, array(11, 12));
+    mb_se_sync($w, array(11, 12));
+    $w->forum->threads[11]['displayorder'] = -1;
+    $w->forum->onRead = function ($what) {
+        if (strpos($what, 'threads:') === 0) {
+            throw new RuntimeException('MySQL server has gone away');
+        }
+    };
+    $result = mb_se_sync($w, array(11, 12));
+    mb_assert(strpos((string) $result->error, '读取论坛数据失败') !== false, 'reported');
+    mb_assert_same(array(12, 11), $w->store->queued(10), 'queue restored');
+    mb_assert_same('synced', $w->store->state(11), 'row untouched');
+    mb_assert_same(array(), $w->server->deletedIds(), 'nothing withdrawn');
+
+    // First posts that all vanish at once are a read failure, not a withdrawal.
+    $w->forum->onRead = null;
+    $w->forum->posts = array();
+    mb_se_sync($w, array(12, 11));
+    mb_assert_same(array(), $w->server->deletedIds(), 'no withdrawal on missing first posts');
+    mb_assert_same(array(12, 11), $w->store->queued(10), 'still queued');
+});
+
+mb_test('runs take a lock and skip or report busy when it is held', function () {
+    $w = mb_se();
+    mb_se_threads($w, array(11));
+    $w->engine->enqueue(array(11), 'hook');
+    $w->store->locks['sync'] = true;
+    $result = $w->engine->drain(mb_se_deadline($w));
+    mb_assert_same(array(), $w->server->routes(), 'drain does nothing');
+    mb_assert_same(array(11), $w->store->queued(10), 'queue kept for cron');
+    mb_assert_same(array(), $w->forum->reads, 'not even a forum read');
+    $w->engine->cronTick(mb_se_deadline($w));
+    mb_assert_same(array(), $w->server->routes(), 'cron does nothing');
+    foreach (array('retryFailed', 'confirmWithdraw') as $method) {
+        $r = $w->engine->$method();
+        mb_assert_same('正在同步，请稍后再试', $r->error, $method . ' reports busy');
+    }
+    $batch = $w->engine->fullSyncBatch(null);
+    mb_assert_same('正在同步，请稍后再试', $batch['result']->error, 'full sync reports busy');
+    mb_assert_same(false, $batch['done'], 'the page may try again');
+    mb_assert_same(array(), $w->server->writes(), 'nothing sent');
+
+    unset($w->store->locks['sync']);
+    $w->engine->drain(mb_se_deadline($w));
+    mb_assert_same('synced', $w->store->state(11), 'runs once free');
+    mb_assert_same(array(), $w->store->locks, 'lock released');
+    mb_assert($w->store->lockTtls['sync'] >= 20 + $w->settings->timeout(), 'ttl covers the deadline and a request');
+});
+
+mb_test('fingerprint-requeued threads go first and withdrawals go 100 per request', function () {
+    $w = mb_se();
+    mb_se_threads($w, range(1, 150), 2);
+    mb_se_full($w);
+    $w->engine->cronTick(mb_se_deadline($w));
+    mb_se_threads($w, range(1001, 1150), 3);
+    $w->engine->enqueue(range(1001, 1150), 'hook');
+    $w->forum->fields[2]['viewperm'] = '1';
+    $w->clock->now += 300;
+    mb_se_reset_requests($w);
+    $w->engine->cronTick(mb_se_deadline($w));
+    $writes = $w->server->writes();
+    mb_assert_same('POST /posts/delete', $writes[0], 'withdrawals before the push backlog');
+    mb_assert_same(2, $w->server->count('POST /posts/delete'), '150 ids in two requests');
+    mb_assert_same(100, count($w->server->bodies('POST /posts/delete')[0]['external_ids']), '100 in the first');
+    mb_assert_same(150, count($w->server->posts), 'forum 3 pushed afterwards');
+});
